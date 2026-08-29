@@ -41,6 +41,11 @@ objuscated scripts, and autorun.inf(s).
   (mbedTLS) so it can download and compile definitions from the XP machine
   itself, with no second computer and no Python.
 
+## Heads Up 
+
+This project IS vibe-coded, but I can personally confirm that these features WORK. I will try my best to keep this program up-to-date and working.
+Thank you.
+
 ## Downloading
 
 You can grab the latest installer from the [**Releases**](../../releases) page and run
