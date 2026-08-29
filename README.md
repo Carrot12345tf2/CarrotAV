@@ -1,61 +1,66 @@
 # CarrotAV
 
-A lightweight antivirus for **Windows XP (32-bit)**. Pure Win32, no .NET, no
-runtime — the scanner is a ~150 KB executable that links only against DLLs that
-ship with XP itself.
-
-Built as a hobby project. It is not a replacement for a maintained commercial
-product on an internet-facing machine, but on a retro XP box it does real work:
-signature and heuristic scanning, live monitoring, a firewall front-end, a web
-shield, archive-bomb detection, system-file integrity checking, and — unusually
-for XP — the ability to download and compile fresh virus definitions directly on
-the machine over modern TLS.
+This is a simple, lightweight anti-virus for Windows XP™ 
+I created this anti-virus because I myself, have an old xp machine. I was tired of 
+constantly looking for modern anti-viruses that would work on it to keep it safe.
+So, I decided to create my own.
 
 ## Features
 
-- **Scanning** — quick, full, deep (byte-pattern), single-file, memory, and
-  startup scans. Right-click any file, folder, drive, or the desktop to scan it.
-- **Detection** — MD5 hash matching against a compiled ClamAV database, literal
-  byte-pattern matching, and signature-free heuristics (packers, double
-  extensions, temp-dropped executables, obfuscated scripts, autorun.inf).
-- **Live monitoring** — three user-mode guards: a file-system watcher, a process
+- **Scanning** — There are 4 different modes of scanning, quick, full, deep, and custom.
+Quick provides an accurate fast scan that utilizes a small amount of resources. Full provides an in-depth scan 
+that is balanced and speedy. Deep on the other hand, will find those sneaky viruses that maybe be really hiding,
+it checks every file and folder. Finally, custom, you can either right click on or in a file/folder then press "scan with
+CarrotAV" to instantly open up CarrotAV and scan those folders.
+
+- **Detection** — This program uses MD5 hash matching against a compiled ClamAV database, actual byte-pattern matching, and wonderful signature-
+filled heuristics. This heuristic checking includes but is not limited to: packers, double extensions, temp-dropped executables,
+objuscated scripts, and autorun.inf(s).
+  
+- **Live monitoring** — There are three user-mode guards: a file-system watcher, a process
   guard that scans new process images, and a registry guard that catches
   autostart changes.
-- **System integrity** — snapshot every system binary; verified files are
+  
+- **System integrity** — There is the option to snapshot every system binary; verified files are
   path-bound, so a real infection still shows even on a baselined file, and
   modified system files can be repaired from Windows' own `dllcache`/`i386`.
-- **Firewall** — controls the built-in XP firewall through its COM API: toggle
-  it, block programs, list and close open ports.
-- **Web shield** — imports a hosts-format blocklist (ships with ~79k domains)
-  inside a managed marker block, so your own HOSTS entries are never touched.
-- **Archive-bomb guard** — reads a zip's manifest without extracting and refuses
-  ratio bombs, recursive (42.zip-style) bombs, entry floods, and zip-slip.
-- **Tray + balloons** — runs in the background from the tray with restrained,
-  non-nagging notifications. Closing the window keeps the shield running.
+  
+- **Firewall** — This program controls the built-in XP firewall through it's COM API, you can toggle
+  it, block programs, and list and close open ports.
+  
+- **Web shield** — This software also imports a hosts-format blocklist (ships with about 79k domains)
+  inside a managed marker block, so your own entries are never touched.
+  
+- **Archive-bomb guard** — This software is equipped for every situation, it can read a zip's manifest without extracting and refuses
+  ratio bombs, recursive (42.zip-style) bombs, entry floods, and zip-slip files.
+  
+- **Tray + balloons** — This program also runs in the background from the tray with restrained,
+  non-nagging notifications. The shield keeps running even if the program window is closed.
+  
 - **Online definition updates** — `defupdate.exe` bundles its own TLS 1.2
   (mbedTLS) so it can download and compile definitions from the XP machine
   itself, with no second computer and no Python.
 
 ## Downloading
 
-Grab the latest installer from the [**Releases**](../../releases) page and run
-it on the XP machine as an administrator. It bundles the scanner, a starter
+You can grab the latest installer from the [**Releases**](../../releases) page and run
+it on the XP machine to install it. It bundles the scanner, a starter
 database, the definition tools, and the web-shield blocklist.
 
 ## Building from source
 
 Cross-compile from Linux/WSL with the mingw-w64 toolchain:
 
-```bash
+bash
 sudo apt install gcc-mingw-w64-i686
 make
-```
+
 
 Output: `carrotav.exe`. Build the installer with NSIS:
 
-```bash
+bash
 makensis installer/carrotav.nsi
-```
+
 
 ## Virus definitions
 
@@ -69,16 +74,6 @@ Definitions are compiled from ClamAV's freely-redistributable database.
 
 The bundled TLS stack needs an occasional refresh as internet certificates and
 ciphers rotate — see [`tools/UPDATING_TLS.txt`](tools/UPDATING_TLS.txt).
-
-## Repository layout
-
-```
-src/          the scanner — C source, resources, manifest, icon
-installer/    NSIS and Inno Setup installer scripts
-tools/        definition builders, the online updater, CA bundle, docs
-updater/      defupdate.exe source (mbedTLS-based TLS 1.2 downloader)
-defs/         the web-shield blocklist (compiled defs are not committed)
-```
 
 ## License
 
