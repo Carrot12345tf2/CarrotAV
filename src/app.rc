@@ -1,0 +1,94 @@
+#include <windows.h>
+#include "resource.h"
+
+1 24 "app.manifest"
+
+IDI_APP ICON "carrot.ico"
+
+IDR_MENU MENU
+BEGIN
+    POPUP "&File"
+    BEGIN
+        MENUITEM "&Quick Scan\tCtrl+Q",        IDM_SCAN_QUICK
+        MENUITEM "&Full System Scan",          IDM_SCAN_FULL
+        MENUITEM "&Deep Scan (patterns)",      IDM_SCAN_DEEP
+        MENUITEM "Scan &Folder...",            IDM_SCAN_CUSTOM
+        MENUITEM SEPARATOR
+        MENUITEM "Scan &Memory",               IDM_SCAN_MEMORY
+        MENUITEM "Scan &Startup Entries",      IDM_SCAN_BOOT
+        MENUITEM SEPARATOR
+        MENUITEM "S&top Scan",                 IDM_SCAN_STOP
+        MENUITEM SEPARATOR
+        MENUITEM "E&xit",                      IDM_EXIT
+    END
+    POPUP "&Quarantine"
+    BEGIN
+        MENUITEM "&Open Vault",                IDM_QUAR_REFRESH
+        MENUITEM SEPARATOR
+        MENUITEM "&Restore Selected",          IDM_QUAR_RESTORE
+        MENUITEM "&Delete Selected",           IDM_QUAR_DELETE
+    END
+    POPUP "&Protection"
+    BEGIN
+        MENUITEM "Toggle Real-time &Shield",   IDM_SHIELD_TOGGLE
+        MENUITEM SEPARATOR
+        MENUITEM "Firewall &On",               IDM_FW_ON
+        MENUITEM "Firewall O&ff",              IDM_FW_OFF
+        MENUITEM "&Block a Program...",        IDM_FW_BLOCKAPP
+        MENUITEM "&Harden Legacy Ports",       IDM_FW_HARDEN
+        MENUITEM SEPARATOR
+        MENUITEM "&Import Web Blocklist...",   IDM_WEB_IMPORT
+        MENUITEM "&Clear Web Blocklist",       IDM_WEB_CLEAR
+    END
+    POPUP "&Definitions"
+    BEGIN
+        MENUITEM "&Update Online (download + compile)", IDM_UPDATE_ONLINE
+        MENUITEM "&Load Definitions from File...", IDM_UPDATE_FILE
+        MENUITEM "Definition &Info",           IDM_UPDATE_INFO
+    END
+    POPUP "&Options"
+    BEGIN
+        MENUITEM "Enable &Heuristics",         IDM_OPT_HEUR
+        MENUITEM "&Auto-quarantine Detections",IDM_OPT_AUTOQUAR
+        MENUITEM "Archive &Bomb Guard",        IDM_OPT_ARCGUARD
+        MENUITEM SEPARATOR
+        MENUITEM "Balloon &Alerts",            IDM_OPT_BALLOON
+        MENUITEM "&Minimize to Tray",          IDM_OPT_TRAY
+        MENUITEM "&Close to Tray (keep shield on)", IDM_OPT_CLOSETRAY
+        MENUITEM "Start &Shield at Logon",     IDM_OPT_AUTORUN
+        MENUITEM SEPARATOR
+        MENUITEM "View &Log",                  IDM_VIEW_LOG
+    END
+    POPUP "&Help"
+    BEGIN
+        MENUITEM "Check &Definition Age",       IDM_CHECK_UPDATE
+        MENUITEM SEPARATOR
+        MENUITEM "&About CarrotAV",            IDM_ABOUT
+    END
+END
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     1,6,0,0
+PRODUCTVERSION  1,6,0,0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904E4"
+        BEGIN
+            VALUE "CompanyName",      "Carrot Software"
+            VALUE "FileDescription",  "CarrotAV Antivirus Scanner"
+            VALUE "FileVersion",      "1.6.0.0"
+            VALUE "InternalName",     "carrotav"
+            VALUE "OriginalFilename", "carrotav.exe"
+            VALUE "ProductName",      "CarrotAV"
+            VALUE "ProductVersion",   "1.6.0.0"
+            VALUE "LegalCopyright",   "Public domain"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1252
+    END
+END

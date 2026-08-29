@@ -1,0 +1,71 @@
+/* Minimal mbedTLS config for an XP HTTPS client. Enough to talk TLS 1.2 to
+ * modern servers (ClamAV, GitHub CDN): ECDHE, RSA, AES-GCM, SHA-2, plus the
+ * curves and cert parsing needed to validate a real chain. */
+#define MBEDTLS_HAVE_ASM
+#define MBEDTLS_PLATFORM_C
+#define MBEDTLS_PLATFORM_MEMORY
+
+/* protocol */
+#define MBEDTLS_SSL_TLS_C
+#define MBEDTLS_SSL_CLI_C
+#define MBEDTLS_SSL_PROTO_TLS1_2
+#define MBEDTLS_SSL_SERVER_NAME_INDICATION
+#define MBEDTLS_SSL_MAX_FRAGMENT_LENGTH
+#define MBEDTLS_SSL_KEEP_PEER_CERTIFICATE
+
+/* key exchange */
+#define MBEDTLS_KEY_EXCHANGE_ECDHE_RSA_ENABLED
+#define MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED
+#define MBEDTLS_KEY_EXCHANGE_RSA_ENABLED
+#define MBEDTLS_KEY_EXCHANGE_DHE_RSA_ENABLED
+
+/* crypto primitives */
+#define MBEDTLS_AES_C
+#define MBEDTLS_GCM_C
+#define MBEDTLS_CCM_C
+#define MBEDTLS_CIPHER_C
+#define MBEDTLS_MD_C
+#define MBEDTLS_SHA224_C
+#define MBEDTLS_SHA256_C
+#define MBEDTLS_SHA384_C
+#define MBEDTLS_SHA512_C
+#define MBEDTLS_SHA1_C
+#define MBEDTLS_RSA_C
+#define MBEDTLS_PKCS1_V15
+#define MBEDTLS_PKCS1_V21
+#define MBEDTLS_ECDH_C
+#define MBEDTLS_ECDSA_C
+#define MBEDTLS_ECP_C
+#define MBEDTLS_BIGNUM_C
+#define MBEDTLS_OID_C
+#define MBEDTLS_ASN1_PARSE_C
+#define MBEDTLS_ASN1_WRITE_C
+#define MBEDTLS_PK_C
+#define MBEDTLS_PK_PARSE_C
+#define MBEDTLS_CIPHER_MODE_CBC
+#define MBEDTLS_CIPHER_PADDING_PKCS7
+
+/* curves modern servers pick */
+#define MBEDTLS_ECP_DP_SECP256R1_ENABLED
+#define MBEDTLS_ECP_DP_SECP384R1_ENABLED
+#define MBEDTLS_ECP_DP_SECP521R1_ENABLED
+#define MBEDTLS_ECP_DP_CURVE25519_ENABLED
+
+/* RNG */
+#define MBEDTLS_ENTROPY_C
+#define MBEDTLS_CTR_DRBG_C
+#define MBEDTLS_NO_PLATFORM_ENTROPY
+
+/* X.509 cert chain validation */
+#define MBEDTLS_X509_USE_C
+#define MBEDTLS_X509_CRT_PARSE_C
+#define MBEDTLS_X509_CRL_PARSE_C
+#define MBEDTLS_PEM_PARSE_C
+#define MBEDTLS_BASE64_C
+
+/* net + error helpers */
+#define MBEDTLS_NET_C
+#define MBEDTLS_ERROR_C
+#define MBEDTLS_SSL_ALL_ALERT_MESSAGES
+#define MBEDTLS_DHM_C
+#define MBEDTLS_GENPRIME

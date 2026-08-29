@@ -1,0 +1,112 @@
+CarrotAV - keeping the online updater working
+=============================================
+
+defupdate.exe carries its own TLS 1.2 stack (mbedTLS) and a CA bundle so it
+can download definitions straight from the XP machine - something XP's own
+crypto can't do anymore. That stack works today, but TLS is a moving target:
+servers drop old ciphers, rotate to new elliptic curves, and the certificate
+authorities that vouch for them expire and get replaced every few years.
+
+So this isn't zero-maintenance forever. Expect to rebuild roughly once every
+year or two, whenever the "Update Online" button starts failing with a
+handshake or certificate error. It's a 10-minute job.
+
+
+SYMPTOMS THAT MEAN "TIME TO REBUILD"
+------------------------------------
+When you click Update Online and the console shows:
+
+  "certificate rejected" / "not correctly signed by the trusted CA"
+        -> the CA bundle is stale. Refresh cacerts.pem (step A only).
+
+  "handshake failed" / a TLS alert / connection closed during handshake
+        -> a server dropped something the bundled mbedTLS supports.
+           Rebuild mbedTLS (step B).
+
+If downloads still work, you don't need to do anything.
+
+
+STEP A - refresh the CA bundle (fixes most failures)
+----------------------------------------------------
+The bundle is just Mozilla's list of trusted roots as a .pem file.
+
+1. On any modern machine with Python:
+       pip download certifi -d certpkg --no-deps
+       cd certpkg && unzip *.whl
+   Find cacert.pem inside (certifi/cacert.pem).
+
+   Or download it directly from:
+       https://curl.se/ca/cacert.pem
+
+2. Copy that file over the XP machine's  CarrotAV\tools\cacerts.pem
+
+That's it - no recompile needed. cacerts.pem is plain data the exe reads at
+runtime.
+
+
+STEP B - rebuild mbedTLS + defupdate.exe (rare)
+-----------------------------------------------
+Only needed if a server drops a cipher/curve the bundled mbedTLS lacks.
+Done on Linux (or WSL) with the mingw cross-compiler.
+
+1. Get a current mbedTLS release:
+       git clone --depth 1 --branch <latest-3.6.x> \
+           https://github.com/Mbed-TLS/mbedtls.git
+       cd mbedtls && git submodule update --init
+
+2. XP has no bcrypt.dll, so mbedTLS's default entropy source won't load.
+   In library/entropy_poll.c, replace the BCryptGenRandom block with XP's
+   legacy CryptGenRandom (CryptAcquireContextA + CryptGenRandom from
+   wincrypt.h). The working version is in updater/entropy_poll_xp.c here -
+   just copy it over library/entropy_poll.c.
+
+3. Compile every library/*.c with the bundled config and the XP target:
+       i686-w64-mingw32-gcc -O2 \
+         -DMBEDTLS_CONFIG_FILE='<xpconfig.h>' \
+         -I<dir with xpconfig.h> -Iinclude -Ilibrary \
+         -D_WIN32_WINNT=0x0501 -DWINVER=0x0501 \
+         -ffunction-sections -fdata-sections -w \
+         -c library/<each>.c -o <each>.o
+       i686-w64-mingw32-ar rcs libmbedtls_xp.a *.o
+
+   xpconfig.h (the trimmed feature set) ships in updater/. If a newer server
+   needs a cipher it doesn't enable, add the matching MBEDTLS_*_C define and
+   rebuild.
+
+4. Relink the updater:
+       i686-w64-mingw32-gcc -O2 -D_WIN32_WINNT=0x0501 -DWINVER=0x0501 \
+         -DMBEDTLS_CONFIG_FILE='<xpconfig.h>' \
+         -I. -Imbedtls/include -Izlib \
+         updater/defupdate.c updater/defs_build.c \
+         libmbedtls_xp.a libz_xp.a \
+         -Wl,--gc-sections -s -lws2_32 -ladvapi32 \
+         -o defupdate.exe
+
+   (libz_xp.a is inflate-only zlib, same cross-compiler - build adler32,
+   crc32, inflate, inftrees, inffast, zutil.)
+
+5. Drop the new defupdate.exe into CarrotAV\tools\ on the XP box.
+
+
+WHY NOT JUST USE XP's OWN TLS?
+------------------------------
+XP's SCHANNEL tops out at TLS 1.0 with ciphers every modern server has
+disabled. There is no setting that adds TLS 1.2 to XP. Bundling mbedTLS is
+the only way to reach today's servers from XP, and the price is this
+occasional rebuild. It beats copying carrot.cdb by hand every time.
+
+
+HOW IT WORKS (for reference)
+----------------------------
+  Update Online button
+    -> launches tools\defupdate.exe with the defs folder as its argument
+    -> defupdate connects to database.clamav.net over TLS 1.2 (mbedTLS),
+       verifying the server cert against tools\cacerts.pem
+    -> downloads main.cvd + daily.cvd
+    -> unpacks each (512-byte header + gzipped tar, via bundled zlib)
+    -> pulls MD5 hash signatures from the .hdb/.hsb members
+    -> writes defs\carrot.cdb (hash signatures only, same format as
+       get_defs.py - no false-positive-prone patterns)
+    -> CarrotAV auto-reloads when the updater exits
+
+get_defs.py still works too, if you'd rather build defs on another PC.
