@@ -168,6 +168,50 @@ BOOL excl_match(const wchar_t *path)
     return hit;
 }
 
+/* ---- restore grace list ----
+ * When the user deliberately restores a file from quarantine, the live shield
+ * must not instantly re-quarantine it - otherwise "Restore" is meaningless for
+ * anything the shield would catch (a restored zip bomb just gets eaten again).
+ * We remember recently-restored paths for a short window and tell the shield
+ * to leave them alone. In-process, so a plain array is enough. */
+#define GRACE_MAX     32
+#define GRACE_SECS    60
+static struct { wchar_t path[MAX_PATH*2]; DWORD until; } g_grace[GRACE_MAX];
+static int g_grace_n = 0;
+
+void grace_add(const wchar_t *path)
+{
+    int i;
+    DWORD now = GetTickCount();
+    /* reuse an expired slot or the oldest one */
+    for (i = 0; i < g_grace_n; i++) {
+        if (!lstrcmpiW(g_grace[i].path, path)) {
+            g_grace[i].until = now + GRACE_SECS * 1000;
+            return;
+        }
+    }
+    if (g_grace_n < GRACE_MAX) i = g_grace_n++;
+    else {
+        int oldest = 0, j;
+        for (j = 1; j < g_grace_n; j++)
+            if (g_grace[j].until < g_grace[oldest].until) oldest = j;
+        i = oldest;
+    }
+    lstrcpynW(g_grace[i].path, path, MAX_PATH*2);
+    g_grace[i].until = now + GRACE_SECS * 1000;
+}
+
+BOOL grace_active(const wchar_t *path)
+{
+    int i;
+    DWORD now = GetTickCount();
+    for (i = 0; i < g_grace_n; i++) {
+        if (!lstrcmpiW(g_grace[i].path, path))
+            return (long)(g_grace[i].until - now) > 0;
+    }
+    return FALSE;
+}
+
 BOOL path_excluded(const wchar_t *path)
 {
     static const wchar_t *critical[] = {
@@ -337,6 +381,34 @@ BOOL quar_restore(const QITEM *it)
                      OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (in == INVALID_HANDLE_VALUE) return FALSE;
 
+    /* The original folder may be gone (user deleted it, or it was a temp
+     * dir). CREATE_ALWAYS fails if the parent doesn't exist, which is the
+     * silent failure that left files un-restored. Recreate the parent path
+     * first. */
+    {
+        wchar_t dir[MAX_PATH*2];
+        wchar_t *p;
+        lstrcpynW(dir, it->orig, MAX_PATH*2);
+        p = wcsrchr(dir, L'\\');
+        if (p) {
+            *p = 0;
+            /* build the directory tree component by component */
+            {
+                wchar_t make[MAX_PATH*2];
+                wchar_t *s = dir;
+                int n = 0;
+                make[0] = 0;
+                while (*s) {
+                    make[n++] = *s;
+                    if (*s == L'\\') { make[n] = 0; CreateDirectoryW(make, NULL); }
+                    s++;
+                }
+                make[n] = 0;
+                CreateDirectoryW(make, NULL);
+            }
+        }
+    }
+
     outh = CreateFileW(it->orig, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                        FILE_ATTRIBUTE_NORMAL, NULL);
     if (outh == INVALID_HANDLE_VALUE) { CloseHandle(in); return FALSE; }
@@ -350,6 +422,7 @@ BOOL quar_restore(const QITEM *it)
     CloseHandle(outh);
     DeleteFileW(it->stored);
     quar_rewrite_without(it);
+    grace_add(it->orig);   /* shield: leave this alone for a bit - user chose it */
     log_line(L"RESTORE  %s", it->orig);
     return TRUE;
 }

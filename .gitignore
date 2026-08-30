@@ -1,4 +1,3 @@
-# build artifacts - never commit these
 *.o
 *.res
 dist/
@@ -7,21 +6,13 @@ _clamav_work/
 clamdb_work/
 src/*.o
 src/app.res
-
-# the main app is built by 'make', not committed
 carrotav.exe
-
-# compiled definitions and downloaded databases (rebuilt, not source)
 defs/carrot.cdb
 defs/system.cavb
 *.cvd
-
-# editor/OS noise
 *.swp
 *~
 .DS_Store
 Thumbs.db
-
-# EXCEPTIONS - these compiled files ARE shipped, keep them:
 !updater/defupdate.exe
 !tools/defupdate.exe

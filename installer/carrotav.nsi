@@ -11,7 +11,7 @@ Var UPGRADING
 Var PREV_VER
 
 !define APPNAME    "CarrotAV"
-!define APPVER     "1.6"
+!define APPVER     "1.7"
 !define APPEXE     "carrotav.exe"
 !define REGUNINST  "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
 
@@ -24,7 +24,7 @@ SetCompressor /SOLID lzma
 BrandingText    "Carrot Software"
 XPStyle on
 
-VIProductVersion "1.6.0.0"
+VIProductVersion "1.7.0.0"
 VIAddVersionKey "ProductName"     "${APPNAME}"
 VIAddVersionKey "FileDescription" "${APPNAME} Setup"
 VIAddVersionKey "FileVersion"     "${APPVER}"
@@ -37,7 +37,9 @@ VIAddVersionKey "LegalCopyright"  "Public domain"
 !define MUI_COMPONENTSPAGE_SMALLDESC
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${APPEXE}"
 !define MUI_FINISHPAGE_RUN_TEXT "Launch ${APPNAME} now"
-!define MUI_FINISHPAGE_RUN_PARAMETERS "/background"
+; No /background here: when the user ticks "Launch now" they expect to SEE the
+; window. Background/tray mode is for the autostart-at-logon entry, not for a
+; deliberate launch - starting hidden made it look like nothing happened.
 !define MUI_FINISHPAGE_SHOWREADME "$INSTDIR\README.txt"
 !define MUI_FINISHPAGE_SHOWREADME_TEXT "Read the setup notes (how to load virus definitions)"
 

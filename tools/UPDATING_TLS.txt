@@ -110,3 +110,18 @@ HOW IT WORKS (for reference)
     -> CarrotAV auto-reloads when the updater exits
 
 get_defs.py still works too, if you'd rather build defs on another PC.
+
+-------------------------------------------------------------------
+DEFINITION SOURCE (added 1.7)
+-------------------------------------------------------------------
+defupdate.exe downloads main.cvd and daily.cvd from Microsoft's public
+ClamAV mirror:
+
+    https://packages.microsoft.com/clamav/
+
+ClamAV's own database.clamav.net sits behind Cloudflare and returns 403
+to any client that isn't a current, rate-limited FreshClam - so a direct
+fetch from XP is blocked by policy. Microsoft mirrors the identical .cvd
+files on an open CDN with no such gatekeeping. If that mirror ever goes
+away, alternatives: run get_defs.py on a modern PC and host the compiled
+carrot.cdb yourself, or point DL_HOST at another ClamAV mirror.

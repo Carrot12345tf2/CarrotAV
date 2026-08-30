@@ -54,7 +54,6 @@
 /* RNG */
 #define MBEDTLS_ENTROPY_C
 #define MBEDTLS_CTR_DRBG_C
-#define MBEDTLS_NO_PLATFORM_ENTROPY
 
 /* X.509 cert chain validation */
 #define MBEDTLS_X509_USE_C

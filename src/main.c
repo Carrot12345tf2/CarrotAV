@@ -20,7 +20,28 @@ static SCANJOB g_job;
 static HANDLE g_thread;
 static int   g_page = TAB_SCAN;
 static QITEM *g_quar; static int g_quarn;
-static BOOL  g_opt_heur = TRUE, g_opt_autoquar = FALSE;
+
+/* Scan detections, kept so the user can quarantine/delete/exclude specific
+ * ones after a scan (scans no longer auto-quarantine). Parallel to the rows
+ * in the Scan tab's list. */
+static DETECTION *g_dets; static int g_detn, g_detcap;
+static void dets_clear(void)
+{
+    if (g_dets) { LocalFree(g_dets); g_dets = NULL; }
+    g_detn = 0; g_detcap = 0;
+}
+static void dets_add(const DETECTION *d)
+{
+    if (g_detn >= g_detcap) {
+        int nc = g_detcap ? g_detcap * 2 : 64;
+        DETECTION *nd = (DETECTION*)LocalAlloc(LPTR, nc * sizeof(DETECTION));
+        if (!nd) return;
+        if (g_dets) { memcpy(nd, g_dets, g_detn * sizeof(DETECTION)); LocalFree(g_dets); }
+        g_dets = nd; g_detcap = nc;
+    }
+    g_dets[g_detn++] = *d;
+}
+static BOOL  g_opt_heur = TRUE;
 static FWAPP *g_fwapps; static int g_fwappn;
 static RTEVENT *g_events; static int g_eventn; static int g_eventcap;
 
@@ -254,8 +275,8 @@ static void page_web(void)
     list_add(L"Safety", L"Marker block", L"Only entries between the CarrotAV markers are ever touched", NULL);
     list_add(L"Heuristics", g_opt_heur ? L"Enabled" : L"Disabled",
              L"Packer entropy, double extensions, temp execs, script obfuscation", NULL);
-    list_add(L"Auto-quarantine", g_opt_autoquar ? L"Enabled" : L"Disabled",
-             L"Move scan detections to the vault automatically", NULL);
+    list_add(L"Scan detections", L"You choose", L"Scans never remove files on their own - you pick what to quarantine", NULL);
+    list_add(L"Live shield", L"Acts automatically", L"Real-time threats (e.g. archive bombs) are quarantined as they appear", NULL);
 
     set_buttons(L"&Import blocklist...", L"&Add domain...", L"&Clear blocklist", NULL, NULL);
     set_status(L"Web shield: %d domain(s) blocked", blocked);
@@ -474,13 +495,11 @@ static void start_scan_path(int mode, const wchar_t *target)
         show_page(TAB_SCAN);
     }
     list_clear();
-
-    memset(&g_job, 0, sizeof(g_job));
+    dets_clear();
     g_job.notify     = g_main;
     g_job.mode       = mode;
     g_job.db         = &g_db;
     g_job.heuristics = g_opt_heur;
-    g_job.autoquar   = g_opt_autoquar;
     lstrcpynW(g_job.root, root, MAX_PATH);
 
     SendMessageW(g_prog, PBM_SETMARQUEE, TRUE, 40);
@@ -712,21 +731,42 @@ static void do_import_blocklist(void)
 static void do_quar_action(BOOL restore)
 {
     int sel = ListView_GetNextItem(g_list, -1, LVNI_SELECTED);
+    BOOL ok;
+    QITEM item;
+
     if (sel < 0 || sel >= g_quarn) {
         MessageBoxW(g_main, L"Select an item first.", AV_NAME, MB_ICONINFORMATION);
         return;
     }
+    /* Copy the entry out before acting: the action rewrites the on-disk
+     * index and page_quar() frees and reloads g_quar, so &g_quar[sel] would
+     * dangle. Work from a copy. */
+    item = g_quar[sel];
+
     if (restore) {
         if (MessageBoxW(g_main, L"Restore this file to its original location?\n\n"
                                 L"The file will be decoded and written back as-is.",
                         AV_NAME, MB_ICONWARNING | MB_YESNO) != IDYES) return;
-        quar_restore(&g_quar[sel]);
+        ok = quar_restore(&item);
+        page_quar();
+        if (ok)
+            MessageBoxW(g_main, L"File restored to its original location.",
+                        AV_NAME, MB_ICONINFORMATION);
+        else
+            MessageBoxW(g_main,
+                L"Could not restore the file.\n\n"
+                L"The quarantined copy may be missing, or the original location "
+                L"is not writable. Nothing was changed.",
+                AV_NAME, MB_ICONERROR);
     } else {
         if (MessageBoxW(g_main, L"Permanently delete this quarantined file?",
                         AV_NAME, MB_ICONWARNING | MB_YESNO) != IDYES) return;
-        quar_delete(&g_quar[sel]);
+        ok = quar_delete(&item);
+        page_quar();
+        if (!ok)
+            MessageBoxW(g_main, L"Could not delete the quarantined file.",
+                        AV_NAME, MB_ICONERROR);
     }
-    page_quar();
 }
 
 static void do_view_log(void)
@@ -1330,13 +1370,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (g_page == TAB_MON) page_mon();
             return 0;
         }
-        case IDM_OPT_AUTOQUAR: {
-            HMENU m = GetMenu(hwnd);
-            g_opt_autoquar = !g_opt_autoquar;
-            CheckMenuItem(m, IDM_OPT_AUTOQUAR, g_opt_autoquar ? MF_CHECKED : MF_UNCHECKED);
-            if (g_page == TAB_MON) page_mon();
-            return 0;
-        }
         case IDM_CHECK_UPDATE: {
             /* No network call. XP can't reach GitHub over modern TLS anyway,
              * so this checks something local and useful instead: how old the
@@ -1346,8 +1379,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (!g_db.loaded) {
                 MessageBoxW(hwnd,
                     L"No virus definitions are loaded.\n\n"
-                    L"Run tools\\get_defs.py on a modern PC to build carrot.cdb, "
-                    L"copy it into the defs folder, then use Definitions -> Reload.",
+                    L"On the Definitions tab, click \"Update online\" to download "
+                    L"and compile them right here - no other PC needed.",
                     L"Definitions", MB_ICONWARNING);
                 return 0;
             }
@@ -1375,9 +1408,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     L"    Built:       %s\n"
                     L"    Age:         %ld day(s)\n"
                     L"    Signatures:  %u\n\n%s\n\n"
-                    L"To refresh: run tools\\get_defs.py on a PC with internet, "
-                    L"copy the new carrot.cdb into this machine's defs folder, "
-                    L"then Definitions -> Reload.\n\n"
+                    L"To refresh: on the Definitions tab, click \"Update online\" "
+                    L"to download and compile the latest definitions right here "
+                    L"- no other PC needed.\n\n"
                     L"App updates: check the GitHub releases page from any PC and "
                     L"run the installer here - it upgrades in place and keeps "
                     L"everything.",
@@ -1437,6 +1470,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         DETECTION *d = (DETECTION*)lp;
         wchar_t name[160];
         MultiByteToWideChar(CP_ACP, 0, d->name, -1, name, 160);
+        /* Remember scan hits (not shield hits) so the user can act on them. */
+        if (msg == WM_SCAN_HIT &&
+            d->kind != DET_DISPUTED && d->kind != DET_MODIFIED)
+            dets_add(d);
         list_add(name, d->path,
                  d->kind == DET_SIG ? L"Signature" :
                  d->kind == DET_HEUR ? L"Heuristic" :
@@ -1444,7 +1481,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                  d->kind == DET_DISPUTED ? L"Disputed" : L"PUA",
                  d->kind == DET_DISPUTED ? L"Verified - ignored" :
                  d->kind == DET_MODIFIED ? L"Repairable" :
-                 (msg == WM_RT_HIT || g_opt_autoquar) ? L"Quarantined" : L"Detected");
+                 msg == WM_RT_HIT ? L"Quarantined" : L"Detected");
         if (msg == WM_RT_HIT) {
             tray_threat(name, d->path);
             set_status(L"Real-time shield quarantined a threat.");
@@ -1487,6 +1524,50 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         } else if (g_job.found == 0 && !g_job.cancel) {
             MessageBoxW(hwnd, L"Scan complete. No threats were found.",
                         AV_NAME, MB_ICONINFORMATION);
+        } else if (g_detn > 0 && !g_job.cancel) {
+            /* Actionable detections exist. Scans don't auto-quarantine, so
+             * ask what to do. The user reviews the list first, then chooses. */
+            wchar_t m[400];
+            int r;
+            wsprintfW(m,
+                L"%d threat(s) were detected and are listed above.\n\n"
+                L"Nothing has been removed. What would you like to do?\n\n"
+                L"    Yes  - quarantine all %d detected file(s)\n"
+                L"    No   - quarantine the file(s) I have SELECTED in the list\n"
+                L"    Cancel - do nothing (review them yourself)",
+                g_detn, g_detn);
+            r = MessageBoxW(hwnd, m, L"Threats detected",
+                            MB_ICONWARNING | MB_YESNOCANCEL);
+            if (r == IDYES) {
+                int i, done = 0;
+                for (i = 0; i < g_detn; i++)
+                    if (quar_add(g_dets[i].path, g_dets[i].name)) done++;
+                {
+                    wchar_t d[128];
+                    wsprintfW(d, L"Quarantined %d of %d file(s).", done, g_detn);
+                    MessageBoxW(hwnd, d, AV_NAME, MB_ICONINFORMATION);
+                }
+                dets_clear();
+                list_clear();
+            } else if (r == IDNO) {
+                /* quarantine only the selected rows */
+                int i, done = 0, any = 0;
+                for (i = 0; i < g_detn; i++) {
+                    if (ListView_GetItemState(g_list, i, LVIS_SELECTED) & LVIS_SELECTED) {
+                        any++;
+                        if (quar_add(g_dets[i].path, g_dets[i].name)) done++;
+                    }
+                }
+                if (!any)
+                    MessageBoxW(hwnd, L"No rows were selected, so nothing was "
+                        L"quarantined.\n\nSelect the threats you want to remove "
+                        L"and use Quarantine again.", AV_NAME, MB_ICONINFORMATION);
+                else {
+                    wchar_t d[128];
+                    wsprintfW(d, L"Quarantined %d of %d selected file(s).", done, any);
+                    MessageBoxW(hwnd, d, AV_NAME, MB_ICONINFORMATION);
+                }
+            }
         }
         return 0;
     }
@@ -1543,6 +1624,41 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmdline, int show)
     (void)prev;
     g_inst = inst;
     CoInitialize(NULL);
+
+    /* Single instance. If CarrotAV is already running - including the
+     * close-to-tray background instance with the shield up - a second launch
+     * must NOT start a whole new process. Doing so gave two independent
+     * shields (two watchers, two tray icons) because each process tracked its
+     * own shield state. Instead, wake the existing window and exit.
+     *
+     * The control switches below (/exitnow, /importhosts, /background) run
+     * before this so the installer and logon paths still work. A plain
+     * user double-click has no switch and hits this guard. */
+    if (!cmdline || (!StrStrIW(cmdline, L"/exitnow") &&
+                     !StrStrIW(cmdline, L"/importhosts") &&
+                     !StrStrIW(cmdline, L"/background") &&
+                     !StrStrIW(cmdline, L"/quick") &&
+                     !StrStrIW(cmdline, L"/full") &&
+                     !StrStrIW(cmdline, L"/deep"))) {
+        HWND existing = FindWindowW(L"CarrotAVMain", NULL);
+        if (existing) {
+            /* Make sure it's a live instance, not a window still tearing down
+             * (e.g. the /exitnow process from an installer upgrade that hasn't
+             * finished). A zombie won't answer a message; if it doesn't, we
+             * ignore it and start normally. */
+            DWORD_PTR res = 0;
+            LRESULT ok = SendMessageTimeoutW(existing, WM_NULL, 0, 0,
+                            SMTO_ABORTIFHUNG | SMTO_BLOCK, 1500, &res);
+            if (ok) {
+                /* live: unhide + foreground the running instance, then leave */
+                ShowWindow(existing, SW_SHOW);
+                ShowWindow(existing, SW_RESTORE);
+                SetForegroundWindow(existing);
+                return 0;
+            }
+            /* not responding - fall through and start a fresh instance */
+        }
+    }
 
     /* Silent helper used by the installer: apply a blocklist and exit.
      *   carrotav.exe /importhosts "C:\\path\\to\\blocklist.txt"      */

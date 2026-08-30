@@ -49,7 +49,6 @@ BEGIN
     POPUP "&Options"
     BEGIN
         MENUITEM "Enable &Heuristics",         IDM_OPT_HEUR
-        MENUITEM "&Auto-quarantine Detections",IDM_OPT_AUTOQUAR
         MENUITEM "Archive &Bomb Guard",        IDM_OPT_ARCGUARD
         MENUITEM SEPARATOR
         MENUITEM "Balloon &Alerts",            IDM_OPT_BALLOON
@@ -68,8 +67,8 @@ BEGIN
 END
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     1,6,0,0
-PRODUCTVERSION  1,6,0,0
+FILEVERSION     1,7,0,0
+PRODUCTVERSION  1,7,0,0
 FILEOS          VOS_NT_WINDOWS32
 FILETYPE        VFT_APP
 BEGIN
@@ -79,11 +78,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Carrot Software"
             VALUE "FileDescription",  "CarrotAV Antivirus Scanner"
-            VALUE "FileVersion",      "1.6.0.0"
+            VALUE "FileVersion",      "1.7.0.0"
             VALUE "InternalName",     "carrotav"
             VALUE "OriginalFilename", "carrotav.exe"
             VALUE "ProductName",      "CarrotAV"
-            VALUE "ProductVersion",   "1.6.0.0"
+            VALUE "ProductVersion",   "1.7.0.0"
             VALUE "LegalCopyright",   "Public domain"
         END
     END

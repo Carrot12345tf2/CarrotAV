@@ -24,7 +24,7 @@
 #include <string.h>
 
 #define AV_NAME     L"CarrotAV"
-#define AV_VERSION  L"1.6"
+#define AV_VERSION  L"1.7"
 #define MAX_PAT     256      /* max signature pattern length in bytes  */
 #define SCAN_CHUNK  (64*1024)
 
@@ -120,6 +120,7 @@ typedef struct {
 
 DWORD WINAPI scan_thread(LPVOID param);
 BOOL  hash_file_md5(const wchar_t *path, unsigned char out[16], unsigned int *size);
+BOOL  known_good_hash(const unsigned char md5[16]);
 int   heur_check(const wchar_t *path, const unsigned char *head, DWORD headlen,
                  DWORD filesize, char *outname, int outsz);
 
@@ -201,6 +202,8 @@ BOOL  path_excluded(const wchar_t *path);
 int   quar_list(QITEM **out);          /* returns count, free with LocalFree */
 BOOL  quar_restore(const QITEM *it);
 BOOL  quar_delete(const QITEM *it);
+void  grace_add(const wchar_t *path);      /* restored files: brief shield exemption */
+BOOL  grace_active(const wchar_t *path);
 
 /* ---------------- protection modules ---------------- */
 

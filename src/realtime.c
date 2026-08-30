@@ -97,6 +97,8 @@ static const char *rt_check(const wchar_t *path, char *hbuf, int hsz)
     if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
         return NULL;
     if (path_excluded(path)) return NULL;
+    if (excl_match(path)) return NULL;       /* user's trusted list */
+    if (grace_active(path)) return NULL;      /* just restored by the user */
 
     InterlockedIncrement(&g_rt.checked);
 
@@ -109,6 +111,7 @@ static const char *rt_check(const wchar_t *path, char *hbuf, int hsz)
     }
 
     if (hash_file_md5(path, md5, &sz)) {
+        if (known_good_hash(md5)) return NULL;   /* legit installer scaffolding */
         /* verified = unchanged at this path; skip it rather than fight a
          * bad signature over a file we know has not been touched */
         if (base_check_path(path, md5) == BASE_CLEAN) return NULL;

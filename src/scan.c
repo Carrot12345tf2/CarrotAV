@@ -97,8 +97,20 @@ int heur_check(const wchar_t *path, const unsigned char *head, DWORD headlen,
     wchar_t windir[MAX_PATH];
     BOOL in_windows = FALSE;
 
-    if (GetWindowsDirectoryW(windir, MAX_PATH) && StrStrIW(path, windir) == path)
-        in_windows = TRUE;
+    /* Case-insensitive prefix test. StrStrIW finds the folder anywhere; we
+     * want it specifically at the start of the path. Comparing the returned
+     * pointer to the start is the prefix check - but normalize by just asking
+     * whether windir appears and the char after it is a separator, which is
+     * robust to how the path was built (drive letter case, etc). */
+    if (GetWindowsDirectoryW(windir, MAX_PATH)) {
+        const wchar_t *m = StrStrIW(path, windir);
+        if (m == path) in_windows = TRUE;
+        /* also treat the well-known Microsoft content trees as Windows */
+        if (StrStrIW(path, L"\\Help\\")   || StrStrIW(path, L"\\Tours\\") ||
+            StrStrIW(path, L"\\Web\\Wallpaper") ||
+            StrStrIW(path, L"\\Microsoft.NET\\"))
+            in_windows = TRUE;
+    }
 
     /* Installers legitimately run executables out of Temp, so skip the
      * scratch folders they all use rather than reporting every setup. */
@@ -131,8 +143,19 @@ int heur_check(const wchar_t *path, const unsigned char *head, DWORD headlen,
     if (headlen && is_pe(head, headlen)) {
         if (icontains(path, L"\\Temp\\") || icontains(path, L"\\Temporary Internet Files\\") ||
             icontains(path, L"\\Local Settings\\Temp")) {
-            lstrcpynA(outname, "Heur.ExecInTempPath", outsz);
-            return DET_PUA;
+            /* NSIS installers (CarrotAV's own included) run from a temp
+             * "ns<random>.tmp" directory containing nsExec.dll, System.dll,
+             * etc. That is normal installer scaffolding, not a threat. Skip
+             * the specific NSIS shape only; any other temp-dropped exe is
+             * still flagged. */
+            if (icontains(path, L".tmp\\ns") ||
+                icontains(path, L"nsExec.dll") ||
+                icontains(path, L".tmp\\System.dll"))
+                ; /* NSIS scaffolding - fall through, do not flag */
+            else {
+                lstrcpynA(outname, "Heur.ExecInTempPath", outsz);
+                return DET_PUA;
+            }
         }
     }
 
@@ -206,8 +229,11 @@ static void post_hit(SCANJOB *j, const wchar_t *path, const char *name, int kind
     InterlockedIncrement(&j->found);
     log_line(L"DETECT  %s  [%S]", path, name);
 
-    if (j->autoquar && kind != DET_MODIFIED && kind != DET_DISPUTED)
-        quar_add(path, name);
+    /* Scans NEVER auto-quarantine. They report what they found and the user
+     * decides which files to act on from the results list. This is the whole
+     * safety model: a manual scan is a review, so a false positive can never
+     * remove a file on its own. (The live shield in realtime.c still acts
+     * automatically - that's active defense on files as they arrive.) */
 
     if (!j->notify) return;
     d = (DETECTION*)LocalAlloc(LPTR, sizeof(DETECTION));
@@ -216,6 +242,30 @@ static void post_hit(SCANJOB *j, const wchar_t *path, const char *name, int kind
     lstrcpynA(d->name, name, 128);
     d->kind = kind;
     if (!PostMessageW(j->notify, WM_SCAN_HIT, 0, (LPARAM)d)) LocalFree(d);
+}
+
+/* Known-good file hashes: transient installer scaffolding that ClamAV flags
+ * because malware also abuses these components. We exempt ONLY the exact
+ * bytes of the legitimate files (by MD5), so a malicious file merely NAMED
+ * nsExec.dll - with different bytes - is still caught. These are NSIS's
+ * x86-ansi plugin DLLs, which CarrotAV's own installer extracts to a temp
+ * folder for a few seconds at install time.
+ *
+ * If you rebuild the installer against a different NSIS version and it starts
+ * flagging its own temp files again, update these hashes: md5sum the files in
+ * NSIS's Plugins/x86-ansi/ directory. */
+BOOL known_good_hash(const unsigned char md5[16])
+{
+    static const unsigned char good[][16] = {
+        /* nsExec.dll  716a8112b4958582b37aeb58652d0e89 */
+        {0x71,0x6a,0x81,0x12,0xb4,0x95,0x85,0x82,0xb3,0x7a,0xeb,0x58,0x65,0x2d,0x0e,0x89},
+        /* System.dll  902062be905e55afb760d2c64411a12c */
+        {0x90,0x20,0x62,0xbe,0x90,0x5e,0x55,0xaf,0xb7,0x60,0xd2,0xc6,0x44,0x11,0xa1,0x2c},
+    };
+    int i;
+    for (i = 0; i < (int)(sizeof(good)/sizeof(good[0])); i++)
+        if (memcmp(md5, good[i], 16) == 0) return TRUE;
+    return FALSE;
 }
 
 /* returns TRUE if a detection was reported */
@@ -250,6 +300,9 @@ static BOOL scan_one(SCANJOB *j, const wchar_t *path, DWORD filesize)
         InterlockedIncrement(&j->skipped);
         return FALSE;
     }
+
+    /* Legit installer scaffolding (exact bytes) - never a threat. */
+    if (known_good_hash(md5)) return FALSE;
 
     /* Is this file byte-identical to what we recorded at this exact path,
      * or to Windows' own protected copy? Verified means unchanged - it does

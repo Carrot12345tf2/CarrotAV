@@ -171,10 +171,15 @@ BOOL wfp_trusted(const wchar_t *path, const unsigned char md5[16])
 
     if (!GetSystemDirectoryW(sys, MAX_PATH)) return FALSE;
 
-    if (StrStrIW(path, L"\\dllcache\\"))
-        wsprintfW(twin, L"%s\\%s", sys, name);       /* cache copy -> system32 */
-    else
-        wsprintfW(twin, L"%s\\dllcache\\%s", sys, name);
+    /* A file that lives inside dllcache IS Windows File Protection's own
+     * pristine reference copy. There is nothing more authoritative to compare
+     * it against, and it is what everything else gets repaired FROM, so trust
+     * it directly. Without this, the cached original gets a plain "Detected"
+     * verdict while its system32 twin shows "Verified" - the same file judged
+     * two different ways depending on which folder you scanned. */
+    if (StrStrIW(path, L"\\dllcache\\")) return TRUE;
+
+    wsprintfW(twin, L"%s\\dllcache\\%s", sys, name);
 
     if (lstrcmpiW(twin, path) == 0) return FALSE;
     if (GetFileAttributesW(twin) == INVALID_FILE_ATTRIBUTES) return FALSE;

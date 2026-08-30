@@ -33,9 +33,16 @@
 #include "mbedtls/error.h"
 
 /* ---- ClamAV download endpoints (HTTPS, TLS 1.2) ---- */
-#define DL_HOST   "database.clamav.net"
+/* Microsoft's public ClamAV mirror. ClamAV's own database.clamav.net sits
+ * behind Cloudflare, which returns 403 to anything that isn't a current,
+ * rate-limited FreshClam client - so a direct fetch from XP is blocked by
+ * policy, not by the network. Microsoft mirrors the exact same .cvd files
+ * (for their own Defender/tooling) on an open, unthrottled CDN with a normal
+ * cert chain XP's bundled TLS validates. Same databases, no gatekeeping. */
+#define DL_HOST   "packages.microsoft.com"
 #define DL_PORT   "443"
-static const char *CVDS[] = { "main.cvd", "daily.cvd", NULL };
+static const char *CVDS[]  = { "main.cvd", "daily.cvd", NULL };
+#define DL_PATHDIR "/clamav/"
 
 #define MIN_PAT      32
 #define MAX_PAT      256
@@ -117,9 +124,9 @@ static int https_download(const char *host, const char *port,
     }
 
     wsprintfA(req,
-        "GET /%s HTTP/1.1\r\nHost: %s\r\n"
+        "GET %s%s HTTP/1.1\r\nHost: %s\r\n"
         "User-Agent: CarrotAV-defupdate/1.0\r\n"
-        "Connection: close\r\n\r\n", path, host);
+        "Connection: close\r\n\r\n", DL_PATHDIR, path, host);
     {
         size_t off = 0, n = strlen(req);
         while (off < n) {
@@ -272,7 +279,7 @@ int main(int argc, char **argv)
     if (got == 0) {
         die("No databases downloaded. If this is a certificate or handshake\n"
             "  error, the bundled TLS may need refreshing (see UPDATING_TLS.txt),\n"
-            "  or the network blocks port 443 to database.clamav.net.");
+            "  or the network blocks port 443 to packages.microsoft.com.");
     }
 
     printf("\n  Step 2/3  compiling carrot.cdb (hash signatures only)\n");
