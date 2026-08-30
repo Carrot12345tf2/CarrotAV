@@ -73,7 +73,7 @@ makensis installer/carrotav.nsi
 Definitions are compiled from ClamAV's freely-redistributable database.
 
 - **On the XP machine:** click **Definitions → Update Online**. This runs
-  `tools/defupdate.exe`, which connects to ClamAV over TLS 1.2, downloads the
+  `tools/defupdate.exe`, which connects to Microsoft's ClamAV definition mirror over TLS 1.2, downloads the
   databases, and compiles `carrot.cdb` locally.
 - **On any modern PC:** run `tools/get_defs.py` (needs Python 3) and copy the
   resulting `carrot.cdb` into the XP machine's `defs` folder.
@@ -83,5 +83,5 @@ ciphers rotate — see [`tools/UPDATING_TLS.txt`](tools/UPDATING_TLS.txt).
 
 ## License
 
-Public domain, except third-party components under their own licenses (ClamAV
+GPL-3.0, third-party components under their own licenses (ClamAV
 signatures are GPL; mbedTLS is Apache 2.0).
