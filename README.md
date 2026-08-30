@@ -1,6 +1,7 @@
 # CarrotAV
 
-This is a simple, lightweight anti-virus for Windows XP™ 
+This is a simple, lightweight anti-virus for Windows XP™
+
 I created this anti-virus because I myself, have an old xp machine. I was tired of 
 constantly looking for modern anti-viruses that would work on it to keep it safe.
 So, I decided to create my own.
