@@ -363,7 +363,7 @@ static void page_update(void)
     }
     list_add(L"Source", L"ClamAV main/daily, compiled by tools\\build_defs.py", NULL, NULL);
 
-    set_buttons(L"&Update online", L"&Load from file...", L"&Reload", L"View &log", NULL);
+    set_buttons(L"&Check for updates", L"&Load from file...", L"&Reload", L"View &log", NULL);
     set_status(L"Definitions: %u signatures", sigdb_count(&g_db));
 }
 
@@ -591,21 +591,46 @@ static void do_load_defs(void)
     show_page(TAB_UPDATE);
 }
 
+/* Read update_check.txt written by defupdate.exe; returns the newer app tag
+ * in 'tag' if one is available, else empty. */
+static void read_update_result(const wchar_t *toolsdir, wchar_t *tag, int cap)
+{
+    wchar_t path[MAX_PATH];
+    FILE *f;
+    char line[128];
+    tag[0] = 0;
+    wsprintfW(path, L"%s\\update_check.txt", toolsdir);
+    f = _wfopen(path, L"r");
+    if (!f) return;
+    while (fgets(line, sizeof(line), f)) {
+        if (!strncmp(line, "update=", 7)) {
+            char *v = line + 7, *e = v;
+            while (*e && *e != '\r' && *e != '\n') e++;
+            *e = 0;
+            MultiByteToWideChar(CP_ACP, 0, v, -1, tag, cap);
+        }
+    }
+    fclose(f);
+    _wremove(path);   /* one-shot */
+}
+
 static void do_update_online(void)
 {
-    wchar_t exedir[MAX_PATH], updater[MAX_PATH], defsdir[MAX_PATH], ca[MAX_PATH];
+    wchar_t exedir[MAX_PATH], toolsdir[MAX_PATH], updater[MAX_PATH];
+    wchar_t defsdir[MAX_PATH], ca[MAX_PATH], params[MAX_PATH*2], newtag[32];
     SHELLEXECUTEINFOW ei;
 
     app_dir(exedir, MAX_PATH);
-    wsprintfW(updater, L"%s\\tools\\defupdate.exe", exedir);
-    wsprintfW(ca,      L"%s\\tools\\cacerts.pem", exedir);
+    wsprintfW(toolsdir, L"%s\\tools", exedir);
+    wsprintfW(updater, L"%s\\defupdate.exe", toolsdir);
+    wsprintfW(ca,      L"%s\\cacerts.pem", toolsdir);
     wsprintfW(defsdir, L"%s\\defs", exedir);
 
     if (GetFileAttributesW(updater) == INVALID_FILE_ATTRIBUTES) {
         MessageBoxW(g_main,
             L"defupdate.exe was not found in the tools folder.\n\n"
-            L"It downloads and compiles fresh definitions directly on this "
-            L"machine over a secure connection. Reinstall CarrotAV to restore it.",
+            L"It checks for updates and downloads fresh definitions over a "
+            L"secure connection. Reinstall CarrotAV to restore it.",
             AV_NAME, MB_ICONWARNING);
         return;
     }
@@ -618,21 +643,24 @@ static void do_update_online(void)
     }
 
     if (MessageBoxW(g_main,
-        L"Download the latest virus definitions now?\n\n"
-        L"CarrotAV will connect to the ClamAV database servers, download the "
-        L"signature databases, and compile them here - no other computer "
-        L"needed. This can take several minutes and a console window will "
-        L"show the progress.\n\n"
-        L"When it finishes, the definitions reload automatically.",
-        L"Update definitions", MB_ICONINFORMATION | MB_YESNO) != IDYES) return;
+        L"Check for updates now?\n\n"
+        L"CarrotAV will check GitHub for a newer version of the program, then "
+        L"download and compile the latest virus definitions from Microsoft's "
+        L"ClamAV mirror - all on this machine, no other computer needed.\n\n"
+        L"A console window shows the progress. Definitions reload automatically "
+        L"when it finishes.",
+        L"Check for Updates", MB_ICONINFORMATION | MB_YESNO) != IDYES) return;
 
-    /* run the updater and wait, so we can auto-reload when it's done */
+    /* pass our version so the updater can compare against GitHub's latest,
+     * plus the defs folder for the download */
+    wsprintfW(params, L"--ver=%s \"%s\"", AV_VERSION, defsdir);
+
     memset(&ei, 0, sizeof(ei));
     ei.cbSize = sizeof(ei);
     ei.fMask  = SEE_MASK_NOCLOSEPROCESS;
     ei.lpVerb = L"open";
     ei.lpFile = updater;
-    ei.lpParameters = defsdir;
+    ei.lpParameters = params;
     ei.nShow = SW_SHOWNORMAL;
 
     if (!ShellExecuteExW(&ei) || !ei.hProcess) {
@@ -654,12 +682,31 @@ static void do_update_online(void)
     }
     CloseHandle(ei.hProcess);
 
+    /* defs first: reload whatever was just compiled */
     do_reload_defs();
     if (g_db.loaded) {
         wchar_t m[160];
         wsprintfW(m, L"Definitions reloaded: %u signatures now active.",
                   sigdb_count(&g_db));
         MessageBoxW(g_main, m, AV_NAME, MB_ICONINFORMATION);
+    }
+
+    /* then the app-update offer, if GitHub had a newer release */
+    read_update_result(toolsdir, newtag, 32);
+    if (newtag[0]) {
+        wchar_t m[500];
+        wsprintfW(m,
+            L"A newer version of CarrotAV is available.\n\n"
+            L"    You have:  %s\n    Latest:    %s\n\n"
+            L"Open the download page to get it? The installer upgrades in "
+            L"place and keeps your settings, quarantine, and definitions.",
+            AV_VERSION, newtag);
+        if (MessageBoxW(g_main, m, L"Update available",
+                        MB_ICONINFORMATION | MB_YESNO) == IDYES) {
+            ShellExecuteW(g_main, L"open",
+                L"https://github.com/Carrot12345tf2/CarrotAV/releases/latest",
+                NULL, NULL, SW_SHOWNORMAL);
+        }
     }
     if (g_page == TAB_UPDATE) page_update();
 }
@@ -1379,7 +1426,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (!g_db.loaded) {
                 MessageBoxW(hwnd,
                     L"No virus definitions are loaded.\n\n"
-                    L"On the Definitions tab, click \"Update online\" to download "
+                    L"On the Definitions tab, click \"Check for updates\" to download "
                     L"and compile them right here - no other PC needed.",
                     L"Definitions", MB_ICONWARNING);
                 return 0;
@@ -1408,7 +1455,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     L"    Built:       %s\n"
                     L"    Age:         %ld day(s)\n"
                     L"    Signatures:  %u\n\n%s\n\n"
-                    L"To refresh: on the Definitions tab, click \"Update online\" "
+                    L"To refresh: on the Definitions tab, click \"Check for updates\" "
                     L"to download and compile the latest definitions right here "
                     L"- no other PC needed.\n\n"
                     L"App updates: check the GitHub releases page from any PC and "

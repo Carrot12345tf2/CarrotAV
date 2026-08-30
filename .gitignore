@@ -10,6 +10,7 @@ carrotav.exe
 defs/carrot.cdb
 defs/system.cavb
 *.cvd
+update_check.txt
 *.swp
 *~
 .DS_Store

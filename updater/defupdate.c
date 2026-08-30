@@ -236,6 +236,115 @@ static int tls_init(const char *cabundle)
     return 0;
 }
 
+/* --------------------------------------------------- app update check
+ * Read the newest CarrotAV release tag from GitHub WITHOUT parsing JSON.
+ * github.com/<repo>/releases/latest issues a 302 redirect to
+ * .../releases/tag/<tag>. We do the request, don't follow the redirect, and
+ * pull the tag out of the Location: header. XP can't reach GitHub with its
+ * own TLS, but our bundled mbedTLS can - same engine that fetches the defs.
+ */
+#define GH_HOST  "github.com"
+#define GH_PATH  "/Carrot12345tf2/CarrotAV/releases/latest"
+#define GH_RELEASES_URL "https://github.com/Carrot12345tf2/CarrotAV/releases"
+
+/* Fetch response headers only; copy the redirect tag into out. Returns 1 on
+ * success (out holds the tag, e.g. "1.8"), 0 on any failure. */
+static int github_latest_tag(char *out, int outcap)
+{
+    mbedtls_net_context net;
+    mbedtls_ssl_context ssl;
+    mbedtls_ssl_config  conf;
+    int ret, ok = 0;
+    char req[512], buf[4096];
+    int total = 0, rd;
+
+    out[0] = 0;
+    mbedtls_net_init(&net);
+    mbedtls_ssl_init(&ssl);
+    mbedtls_ssl_config_init(&conf);
+
+    if (mbedtls_net_connect(&net, GH_HOST, "443", MBEDTLS_NET_PROTO_TCP) != 0) goto done;
+    if (mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT,
+            MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT) != 0) goto done;
+    mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+    mbedtls_ssl_conf_ca_chain(&conf, &g_cacert, NULL);
+    mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &g_drbg);
+    mbedtls_ssl_conf_min_version(&conf, MBEDTLS_SSL_MAJOR_VERSION_3,
+                                        MBEDTLS_SSL_MINOR_VERSION_3);
+    if (mbedtls_ssl_setup(&ssl, &conf) != 0) goto done;
+    if (mbedtls_ssl_set_hostname(&ssl, GH_HOST) != 0) goto done;
+    mbedtls_ssl_set_bio(&ssl, &net, mbedtls_net_send, mbedtls_net_recv, NULL);
+
+    while ((ret = mbedtls_ssl_handshake(&ssl)) != 0)
+        if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) goto done;
+    if (mbedtls_ssl_get_verify_result(&ssl) != 0) goto done;
+
+    wsprintfA(req,
+        "GET %s HTTP/1.1\r\nHost: %s\r\n"
+        "User-Agent: CarrotAV-defupdate/1.0\r\n"
+        "Accept: text/html\r\nConnection: close\r\n\r\n", GH_PATH, GH_HOST);
+    {
+        int off = 0, n = (int)strlen(req);
+        while (off < n) {
+            ret = mbedtls_ssl_write(&ssl, (unsigned char*)req + off, n - off);
+            if (ret <= 0) goto done;
+            off += ret;
+        }
+    }
+    /* read just enough to capture the headers (Location is near the top) */
+    while (total < (int)sizeof(buf) - 1) {
+        ret = mbedtls_ssl_read(&ssl, (unsigned char*)buf + total, sizeof(buf) - 1 - total);
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+        if (ret <= 0) break;
+        total += ret;
+        if (strstr(buf, "\r\n\r\n")) break;   /* end of headers */
+    }
+    buf[total] = 0;
+
+    /* find "Location: https://github.com/.../releases/tag/<TAG>" */
+    {
+        char *loc = strstr(buf, "location:");
+        if (!loc) loc = strstr(buf, "Location:");
+        if (loc) {
+            char *tag = strstr(loc, "/tag/");
+            if (tag) {
+                tag += 5;
+                int i = 0;
+                while (tag[i] && tag[i] != '\r' && tag[i] != '\n' &&
+                       tag[i] != ' ' && i < outcap - 1) {
+                    out[i] = tag[i]; i++;
+                }
+                out[i] = 0;
+                if (i > 0) ok = 1;
+            }
+        }
+    }
+done:
+    mbedtls_ssl_close_notify(&ssl);
+    mbedtls_net_free(&net);
+    mbedtls_ssl_free(&ssl);
+    mbedtls_ssl_config_free(&conf);
+    return ok;
+}
+
+/* dotted-version compare: returns <0, 0, >0 for a<b, a==b, a>b. Skips a
+ * leading 'v' if present. 1.10 > 1.9. */
+static int ver_cmp(const char *a, const char *b)
+{
+    if (*a == 'v' || *a == 'V') a++;
+    if (*b == 'v' || *b == 'V') b++;
+    while (*a || *b) {
+        int na = 0, nb = 0;
+        while (*a >= '0' && *a <= '9') na = na*10 + (*a++ - '0');
+        while (*b >= '0' && *b <= '9') nb = nb*10 + (*b++ - '0');
+        if (na != nb) return na < nb ? -1 : 1;
+        if (*a == '.') a++;
+        if (*b == '.') b++;
+        if (!*a && !*b) break;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     char exedir[MAX_PATH], ca[MAX_PATH], defsdir[MAX_PATH];
@@ -252,20 +361,59 @@ int main(int argc, char **argv)
 
     wsprintfA(ca, "%s\\cacerts.pem", exedir);
 
-    /* defs folder: ..\defs relative to tools\, or a path arg */
-    if (argc > 1) {
-        lstrcpynA(defsdir, argv[1], MAX_PATH);
-    } else {
-        char parent[MAX_PATH];
-        lstrcpynA(parent, exedir, MAX_PATH);
-        p = strrchr(parent, '\\'); if (p) *p = 0;   /* drop \tools */
-        wsprintfA(defsdir, "%s\\defs", parent);
+    /* defs folder: ..\defs relative to tools\, or the first non-flag arg */
+    {
+        const char *defarg = NULL;
+        int j;
+        for (j = 1; j < argc; j++)
+            if (argv[j][0] != '-') { defarg = argv[j]; break; }
+        if (defarg) {
+            lstrcpynA(defsdir, defarg, MAX_PATH);
+        } else {
+            char parent[MAX_PATH];
+            lstrcpynA(parent, exedir, MAX_PATH);
+            p = strrchr(parent, '\\'); if (p) *p = 0;   /* drop \tools */
+            wsprintfA(defsdir, "%s\\defs", parent);
+        }
     }
     CreateDirectoryA(defsdir, NULL);
 
     if (tls_init(ca) != 0) die("TLS init failed - see messages above.");
 
-    printf("  Step 1/3  downloading ClamAV databases\n");
+    /* App-update check. When the main app passes --ver=<current>, we compare
+     * against GitHub's latest release tag and write the result to
+     * <defsdir>\..\update_check.txt, which the GUI reads to decide whether to
+     * offer an update. We also print human-readable status to the console. */
+    {
+        const char *myver = NULL;
+        int j;
+        for (j = 1; j < argc; j++)
+            if (!strncmp(argv[j], "--ver=", 6)) myver = argv[j] + 6;
+
+        if (myver) {
+            char tag[32], respath[MAX_PATH];
+            FILE *rf;
+            wsprintfA(respath, "%s\\update_check.txt", exedir);
+            printf("  Checking for a newer CarrotAV release ...\n");
+            rf = fopen(respath, "w");
+            if (github_latest_tag(tag, sizeof(tag))) {
+                if (ver_cmp(myver, tag) < 0) {
+                    printf("  A newer CarrotAV (%s) is available; you have %s.\n\n",
+                           tag, myver);
+                    if (rf) fprintf(rf, "update=%s\n", tag);
+                } else {
+                    printf("  CarrotAV is up to date (%s).\n\n", myver);
+                    if (rf) fprintf(rf, "current=%s\n", myver);
+                }
+            } else {
+                printf("  (could not reach GitHub to check the app version)\n\n");
+                if (rf) fprintf(rf, "error=unreachable\n");
+            }
+            if (rf) fclose(rf);
+        }
+    }
+
+
     for (i = 0; CVDS[i]; i++) {
         wsprintfA(cvdpaths[i], "%s\\%s", defsdir, CVDS[i]);
         if (https_download(DL_HOST, DL_PORT, CVDS[i], cvdpaths[i]) == 0) {

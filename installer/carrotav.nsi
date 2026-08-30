@@ -11,20 +11,26 @@ Var UPGRADING
 Var PREV_VER
 
 !define APPNAME    "CarrotAV"
-!define APPVER     "1.7"
+!define APPVER     "1.8"
 !define APPEXE     "carrotav.exe"
 !define REGUNINST  "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
 
 Name            "${APPNAME} ${APPVER}"
 OutFile         "..\dist\CarrotAV-${APPVER}-Setup.exe"
-InstallDir      "$PROGRAMFILES\${APPNAME}"
+; Install to <systemdrive>\CarrotAV, NOT "Program Files". The space in
+; "Program Files" is what makes XP throw the "rename C:\Program to Program1"
+; warning whenever any autostart path isn't perfectly quoted. A space-free
+; path sidesteps that whole class of problem - and it's easier to find and
+; back up, which suits a lightweight tool. The real system drive is filled in
+; at install time in .onInit (falls back to C:).
+InstallDir      "C:\${APPNAME}"
 InstallDirRegKey HKLM "Software\${APPNAME}" "InstallPath"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 BrandingText    "Carrot Software"
 XPStyle on
 
-VIProductVersion "1.7.0.0"
+VIProductVersion "1.8.0.0"
 VIAddVersionKey "ProductName"     "${APPNAME}"
 VIAddVersionKey "FileDescription" "${APPNAME} Setup"
 VIAddVersionKey "FileVersion"     "${APPVER}"
@@ -71,6 +77,14 @@ Section "Scanner engine (required)" SecCore
 
   WriteRegStr HKLM "Software\${APPNAME}" "InstallPath" "$INSTDIR"
   WriteRegStr HKLM "Software\${APPNAME}" "Version"     "${APPVER}"
+
+  ; Scrub autostart entries from older versions. Pre-1.8 installers wrote an
+  ; HKLM "CarrotAV Shield" Run value, and some early builds wrote it without
+  ; quotes - which makes XP show a "rename C:\Program to Program1" warning at
+  ; every boot because of the space in "Program Files". Remove the old value
+  ; unconditionally; the current quoted HKCU entry is written by SecStartup.
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "CarrotAV Shield"
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "CarrotAV"
 
   WriteRegStr HKLM "${REGUNINST}" "DisplayName"     "${APPNAME} ${APPVER}"
   WriteRegStr HKLM "${REGUNINST}" "DisplayVersion"  "${APPVER}"
@@ -150,8 +164,14 @@ Section "Desktop icon" SecDesktop
 SectionEnd
 
 Section "Start real-time shield with Windows" SecStartup
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" \
-              "CarrotAV Shield" '"$INSTDIR\${APPEXE}"'
+  ; The app manages its own logon entry (HKCU "CarrotAV", properly quoted,
+  ; with /background so it starts silently in the tray). We just enable that
+  ; here by writing the same value the app's "Start Shield at Logon" toggle
+  ; uses. Quotes around the path are REQUIRED - without them XP misreads
+  ; "C:\Program Files\..." at the space and pops a "rename to Program1"
+  ; warning at every boot.
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" \
+              "CarrotAV" '"$INSTDIR\${APPEXE}" /background'
 SectionEnd
 
 Section "Web shield blocklist (79,746 domains)" SecWeb
@@ -192,6 +212,11 @@ Function .onInit
   ${If} $0 != ""
     StrCpy $INSTDIR $0            ; upgrade in place, same folder
     StrCpy $UPGRADING "1"
+  ${Else}
+    ; fresh install: use the real system drive (usually C:), space-free path
+    StrCpy $INSTDIR "$WINDIR"     ; e.g. C:\WINDOWS
+    StrCpy $INSTDIR $INSTDIR 2    ; -> "C:"
+    StrCpy $INSTDIR "$INSTDIR\${APPNAME}"   ; -> C:\CarrotAV
   ${EndIf}
 
   ; A running instance (window or /background tray) would lock carrotav.exe,
