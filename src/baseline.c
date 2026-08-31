@@ -164,21 +164,34 @@ const unsigned char *base_md5_at(unsigned int i)
 /* Is this file byte-identical to Windows' own protected copy? */
 BOOL wfp_trusted(const wchar_t *path, const unsigned char md5[16])
 {
-    wchar_t sys[MAX_PATH], twin[MAX_PATH];
+    wchar_t sys[MAX_PATH], realcache[MAX_PATH], twin[MAX_PATH];
     const wchar_t *name = PathFindFileNameW(path);
     unsigned char other[16];
     unsigned int sz = 0;
+    size_t clen;
 
     if (!GetSystemDirectoryW(sys, MAX_PATH)) return FALSE;
 
-    /* A file that lives inside dllcache IS Windows File Protection's own
-     * pristine reference copy. There is nothing more authoritative to compare
-     * it against, and it is what everything else gets repaired FROM, so trust
-     * it directly. Without this, the cached original gets a plain "Detected"
-     * verdict while its system32 twin shows "Verified" - the same file judged
-     * two different ways depending on which folder you scanned. */
-    if (StrStrIW(path, L"\\dllcache\\")) return TRUE;
+    /* The ONE trusted dllcache is Windows File Protection's own, at
+     * %SystemRoot%\system32\dllcache. A file there is a pristine reference
+     * copy and can be trusted directly.
+     *
+     * SECURITY: this must be an exact-directory check, NOT a substring match.
+     * An earlier version did `StrStrIW(path, L"\\dllcache\\")`, which trusted
+     * ANY folder named dllcache anywhere - so C:\evil\dllcache\virus.exe was
+     * treated as a pristine system file and the shield skipped it before the
+     * signature check. We now build the real cache path and require the file
+     * to sit directly inside it (path == realcache\<filename>, matched whole,
+     * case-insensitive), so no attacker-controlled directory can spoof it. */
+    wsprintfW(realcache, L"%s\\dllcache", sys);
+    clen = lstrlenW(realcache);
+    if ((size_t)(name - path) == clen + 1 &&        /* file sits right under it */
+        StrCmpNIW(path, realcache, (int)clen) == 0 && /* prefix is the real cache */
+        path[clen] == L'\\')                          /* boundary is a separator */
+        return TRUE;
 
+    /* Otherwise, trust a file only if it byte-matches its twin in the real
+     * dllcache. */
     wsprintfW(twin, L"%s\\dllcache\\%s", sys, name);
 
     if (lstrcmpiW(twin, path) == 0) return FALSE;

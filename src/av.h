@@ -24,7 +24,7 @@
 #include <string.h>
 
 #define AV_NAME     L"CarrotAV"
-#define AV_VERSION  L"1.8"
+#define AV_VERSION  L"1.8.1"
 #define MAX_PAT     256      /* max signature pattern length in bytes  */
 #define SCAN_CHUNK  (64*1024)
 
