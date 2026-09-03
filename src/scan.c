@@ -385,7 +385,15 @@ static BOOL want_file(SCANJOB *j, const wchar_t *name, DWORD size)
         L".zip",L".rar",L".cab",L".msi",L".inf",L".reg",NULL
     };
     int i;
-    if (size > 200u*1024u*1024u) return FALSE;    /* skip giant blobs */
+    /* Too big to scan: this IS a real coverage gap, so count it as skipped.
+     * (Files filtered out by extension below are NOT counted - in Quick/Full
+     * mode that's the scan working as designed, and counting them would report
+     * tens of thousands of "skipped" files on every run, which tells the user
+     * nothing useful. "Skipped" means "we wanted to check this and couldn't".) */
+    if (size > 200u*1024u*1024u) {
+        InterlockedIncrement(&j->skipped);
+        return FALSE;
+    }
     if (j->mode == SCAN_DEEP || j->mode == SCAN_CUSTOM) return TRUE;
     if (!e) return FALSE;
     for (i = 0; hot[i]; i++) if (!lstrcmpiW(e, hot[i])) return TRUE;
@@ -402,7 +410,12 @@ static void walk(SCANJOB *j, const wchar_t *dir, int depth)
 
     wsprintfW(pat, L"%s\\*", dir);
     h = FindFirstFileW(pat, &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
+    if (h == INVALID_HANDLE_VALUE) {
+        /* Couldn't enumerate this directory (permissions, locked, gone). That
+         * is a real gap in coverage, so record it rather than failing silently. */
+        InterlockedIncrement(&j->skipped);
+        return;
+    }
 
     InterlockedIncrement(&j->dirs);
 

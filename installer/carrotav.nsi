@@ -11,7 +11,7 @@ Var UPGRADING
 Var PREV_VER
 
 !define APPNAME    "CarrotAV"
-!define APPVER     "1.8.1"
+!define APPVER     "1.9"
 !define APPEXE     "carrotav.exe"
 !define REGUNINST  "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
 
@@ -30,7 +30,7 @@ SetCompressor /SOLID lzma
 BrandingText    "Carrot Software"
 XPStyle on
 
-VIProductVersion "1.8.1.0"
+VIProductVersion "1.9.0.0"
 VIAddVersionKey "ProductName"     "${APPNAME}"
 VIAddVersionKey "FileDescription" "${APPNAME} Setup"
 VIAddVersionKey "FileVersion"     "${APPVER}"

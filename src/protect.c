@@ -154,6 +154,23 @@ int excl_list(wchar_t ***out)
     return n;
 }
 
+/* Does 'path' fall under the excluded directory (or equal an excluded file)?
+ *
+ * This used to be a raw substring test, which over-matched badly: an exclusion
+ * for "C:\Temp" also excluded "C:\Temperature\", and an entry like "bin" would
+ * exclude every path containing those letters anywhere. Now the exclusion must
+ * match from the start of the path and end on a real boundary - either the
+ * whole path, or followed by a backslash. */
+static BOOL excl_covers(const wchar_t *path, const wchar_t *excl)
+{
+    int n = lstrlenW(excl);
+    if (n <= 0) return FALSE;
+    /* ignore a trailing backslash on the stored exclusion */
+    while (n > 1 && excl[n-1] == L'\\') n--;
+    if (StrCmpNIW(path, excl, n) != 0) return FALSE;
+    return path[n] == 0 || path[n] == L'\\';
+}
+
 BOOL excl_match(const wchar_t *path)
 {
     wchar_t **list;
@@ -161,7 +178,7 @@ BOOL excl_match(const wchar_t *path)
     BOOL hit = FALSE;
     n = excl_list(&list);
     for (i = 0; i < n; i++) {
-        if (!hit && StrStrIW(path, list[i])) hit = TRUE;
+        if (!hit && excl_covers(path, list[i])) hit = TRUE;
         free(list[i]);
     }
     free(list);
@@ -265,6 +282,8 @@ BOOL quar_add(const wchar_t *path, const char *threat)
     QITEM it;
     static LONG counter = 0;
     LONG id;
+    DWORD srcsize = 0, written = 0;
+    BOOL copy_ok = TRUE, deleted;
 
     if (path_excluded(path)) {
         log_line(L"PROTECTED  refused to quarantine %s [%S]", path, threat);
@@ -286,21 +305,50 @@ BOOL quar_add(const wchar_t *path, const char *threat)
     if (outh == INVALID_HANDLE_VALUE) { CloseHandle(in); return FALSE; }
 
     memset(&it, 0, sizeof(it));
-    it.size = GetFileSize(in, NULL);
+    srcsize = GetFileSize(in, NULL);
+    it.size = srcsize;
 
+    /* --- copy into the vault, checking every write --- */
     for (;;) {
-        if (!ReadFile(in, buf, sizeof(buf), &rd, NULL) || rd == 0) break;
+        if (!ReadFile(in, buf, sizeof(buf), &rd, NULL)) { copy_ok = FALSE; break; }
+        if (rd == 0) break;
         for (i = 0; i < rd; i++) buf[i] ^= QMASK;
-        WriteFile(outh, buf, rd, &wr, NULL);
+        if (!WriteFile(outh, buf, rd, &wr, NULL) || wr != rd) {
+            copy_ok = FALSE;            /* disk full, write error, etc. */
+            break;
+        }
+        written += wr;
     }
+    FlushFileBuffers(outh);             /* get it on disk before we delete */
     CloseHandle(in);
     CloseHandle(outh);
 
-    /* original must go; clear read-only/hidden first */
+    /* --- verify the vault copy is complete BEFORE touching the original ---
+     * Deleting first and discovering the copy was short would destroy the
+     * file. If anything went wrong, throw away the partial vault file and
+     * leave the original alone - a failed quarantine must not lose data. */
+    if (!copy_ok || written != srcsize) {
+        DeleteFileW(dest);
+        log_line(L"QUARANTINE  FAILED to vault %s (%lu of %lu bytes) - original left in place",
+                 path, written, srcsize);
+        return FALSE;
+    }
+
+    /* --- now remove the original --- */
     SetFileAttributesW(path, FILE_ATTRIBUTE_NORMAL);
-    if (!DeleteFileW(path)) {
-        /* locked file: schedule removal at next boot */
-        MoveFileExW(path, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
+    deleted = DeleteFileW(path);
+    if (!deleted) {
+        /* Locked (running executable, open handle). Schedule removal at next
+         * boot - but only claim success if that scheduling actually worked. */
+        if (MoveFileExW(path, NULL, MOVEFILE_DELAY_UNTIL_REBOOT)) {
+            log_line(L"QUARANTINE  %s -> %s (original locked; removal pending reboot)",
+                     path, dest);
+        } else {
+            /* We could neither delete nor schedule. The vault copy exists but
+             * the threat is STILL THERE - say so rather than reporting success. */
+            log_line(L"QUARANTINE  INCOMPLETE %s -> %s (could not remove original)",
+                     path, dest);
+        }
     }
 
     lstrcpynW(it.orig, path, MAX_PATH*2);
@@ -316,7 +364,8 @@ BOOL quar_add(const wchar_t *path, const char *threat)
         WriteFile(outh, &it, sizeof(it), &wr, NULL);
         CloseHandle(outh);
     }
-    log_line(L"QUARANTINE  %s -> %s", path, dest);
+    if (deleted)
+        log_line(L"QUARANTINE  %s -> %s", path, dest);
     return TRUE;
 }
 
@@ -413,13 +462,31 @@ BOOL quar_restore(const QITEM *it)
                        FILE_ATTRIBUTE_NORMAL, NULL);
     if (outh == INVALID_HANDLE_VALUE) { CloseHandle(in); return FALSE; }
 
-    for (;;) {
-        if (!ReadFile(in, buf, sizeof(buf), &rd, NULL) || rd == 0) break;
-        for (i = 0; i < rd; i++) buf[i] ^= QMASK;
-        WriteFile(outh, buf, rd, &wr, NULL);
+    {
+        DWORD vaultsize = GetFileSize(in, NULL), written = 0;
+        BOOL ok = TRUE;
+        for (;;) {
+            if (!ReadFile(in, buf, sizeof(buf), &rd, NULL)) { ok = FALSE; break; }
+            if (rd == 0) break;
+            for (i = 0; i < rd; i++) buf[i] ^= QMASK;
+            if (!WriteFile(outh, buf, rd, &wr, NULL) || wr != rd) { ok = FALSE; break; }
+            written += wr;
+        }
+        FlushFileBuffers(outh);
+        CloseHandle(in);
+        CloseHandle(outh);
+
+        /* Only drop the vault copy once the restored file is known good. A
+         * short or failed write would otherwise leave a truncated file on disk
+         * AND destroy the only intact copy. */
+        if (!ok || written != vaultsize) {
+            DeleteFileW(it->orig);
+            log_line(L"RESTORE  FAILED %s (%lu of %lu bytes) - kept in quarantine",
+                     it->orig, written, vaultsize);
+            return FALSE;
+        }
     }
-    CloseHandle(in);
-    CloseHandle(outh);
+
     DeleteFileW(it->stored);
     quar_rewrite_without(it);
     grace_add(it->orig);   /* shield: leave this alone for a bit - user chose it */

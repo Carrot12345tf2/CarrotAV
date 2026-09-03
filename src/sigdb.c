@@ -42,6 +42,15 @@ BOOL sigdb_load(SIGDB *db, const wchar_t *path)
         db->hdr.patblob > 268435456u || db->hdr.nameblob > 268435456u)
         goto fail;
 
+    /* The allocation sizes below are computed in 32-bit if we aren't careful:
+     * nhash * sizeof(SIGHASH) can wrap and under-allocate, after which the
+     * ReadFile would write past the buffer. Do the multiply in 64-bit and
+     * reject anything that doesn't fit in a DWORD. This database is data from
+     * disk that we do not control, so every field gets checked. */
+    if ((unsigned __int64)db->hdr.nhash * sizeof(SIGHASH) > 0xFFFFFFFFull ||
+        (unsigned __int64)db->hdr.npat  * sizeof(SIGPAT)  > 0xFFFFFFFFull)
+        goto fail;
+
     if (db->hdr.nhash) {
         db->hashes = (SIGHASH*)malloc((size_t)db->hdr.nhash * sizeof(SIGHASH));
         if (!db->hashes) goto fail;
@@ -69,15 +78,59 @@ BOOL sigdb_load(SIGDB *db, const wchar_t *path)
     }
     CloseHandle(h);
 
+    /* ---- validate every record before anything uses it ----
+     *
+     * A malformed or hostile carrot.cdb must not be able to make us read
+     * outside our own buffers. The file gives us offsets into two blobs
+     * (patdata and names) and we previously trusted most of them:
+     *
+     *   - pattern data was checked with `dataoff >= patblob` only, so a
+     *     pattern with dataoff = patblob-1 and len = 200 read 199 bytes off
+     *     the end during matching;
+     *   - nameoff was never checked at all, yet `db->names + nameoff` is
+     *     returned as a C string on every hit.
+     *
+     * Rather than re-checking at match time (easy to miss a path), we sanitize
+     * here once: any record that doesn't fit is neutered - patterns get len 0
+     * so the matcher skips them, and bad name offsets are pointed at the
+     * blob's final NUL so they read as an empty string instead of running off
+     * the end. After this loop, every remaining offset is in range. */
+    if (db->names && db->hdr.nameblob)
+        db->names[db->hdr.nameblob - 1] = 0;   /* guarantee a terminator */
+
+    /* If records exist but the blob they point into does not, there is no safe
+     * offset to fall back to - `names + anything` would be NULL-based. Reject
+     * the database outright instead of hoping every caller NULL-checks. */
+    if ((db->hdr.nhash || db->hdr.npat) && (!db->names || !db->hdr.nameblob))
+        { sigdb_free(db); return FALSE; }
+    if (db->hdr.npat && (!db->patdata || !db->hdr.patblob))
+        { sigdb_free(db); return FALSE; }
+
+    for (i = 0; i < db->hdr.nhash; i++) {
+        if (db->hashes[i].nameoff >= db->hdr.nameblob)
+            db->hashes[i].nameoff = db->hdr.nameblob - 1;
+    }
+    for (i = 0; i < db->hdr.npat; i++) {
+        SIGPAT *p = &db->pats[i];
+        /* pattern bytes must lie wholly inside patdata */
+        if (p->len == 0 || p->len > MAX_PAT ||
+            p->dataoff >= db->hdr.patblob ||
+            (unsigned __int64)p->dataoff + p->len > db->hdr.patblob) {
+            p->len = 0;                 /* matcher skips zero-length patterns */
+            continue;
+        }
+        if (p->nameoff >= db->hdr.nameblob)
+            p->nameoff = db->hdr.nameblob - 1;
+    }
+
     /* the writer should already sort, but never trust the file */
     if (db->hdr.nhash > 1)
         qsort(db->hashes, db->hdr.nhash, sizeof(SIGHASH), cmp_md5);
 
-    /* bucket patterns by first byte */
+    /* bucket patterns by first byte (all offsets validated above) */
     memset(counts, 0, sizeof(counts));
     for (i = 0; i < db->hdr.npat; i++) {
-        if (db->pats[i].len == 0 || db->pats[i].len > MAX_PAT) continue;
-        if (db->pats[i].dataoff >= db->hdr.patblob) continue;
+        if (db->pats[i].len == 0) continue;
         counts[db->patdata[db->pats[i].dataoff]]++;
     }
     for (b = 0; b < 256; b++) {
@@ -87,8 +140,7 @@ BOOL sigdb_load(SIGDB *db, const wchar_t *path)
         }
     }
     for (i = 0; i < db->hdr.npat; i++) {
-        if (db->pats[i].len == 0 || db->pats[i].len > MAX_PAT) continue;
-        if (db->pats[i].dataoff >= db->hdr.patblob) continue;
+        if (db->pats[i].len == 0) continue;
         b = db->patdata[db->pats[i].dataoff];
         db->bucket[b][db->bucketn[b]++] = i;
     }
@@ -113,7 +165,7 @@ const char *sigdb_match_hash(SIGDB *db, const unsigned char md5[16], unsigned in
     long lo, hi, mid;
     int  c;
 
-    if (!db || !db->loaded || !db->hdr.nhash) return NULL;
+    if (!db || !db->loaded || !db->hdr.nhash || !db->names) return NULL;
 
     lo = 0; hi = (long)db->hdr.nhash - 1;
     while (lo <= hi) {
@@ -142,6 +194,7 @@ const char *sigdb_match_buf(SIGDB *db, const unsigned char *buf, unsigned int le
     const SIGPAT *p;
 
     if (!db || !db->loaded || !db->hdr.npat || len < 2) return NULL;
+    if (!db->patdata || !db->names) return NULL;
 
     for (i = 0; i < len; i++) {
         first = buf[i];

@@ -496,10 +496,18 @@ static void start_scan_path(int mode, const wchar_t *target)
     }
     list_clear();
     dets_clear();
+
+    /* Reset the whole job before starting. This MUST happen: g_job.cancel
+     * stays set after a Stop, so without clearing it the next scan sees
+     * "cancelled" immediately and exits having scanned 0 files. The stats
+     * (files/found/skipped) would also carry over from the previous run. */
+    memset(&g_job, 0, sizeof(g_job));
+
     g_job.notify     = g_main;
     g_job.mode       = mode;
     g_job.db         = &g_db;
     g_job.heuristics = g_opt_heur;
+    g_job.archives   = g_arcguard;
     lstrcpynW(g_job.root, root, MAX_PATH);
 
     SendMessageW(g_prog, PBM_SETMARQUEE, TRUE, 40);
@@ -1197,8 +1205,9 @@ static void g_autostart_set(BOOL on)
 
 static void layout(void)
 {
-    RECT rc, sb;
+    RECT rc, sb, page;
     int w, h, btnw = 128, btnh = 26, pad = 8, i, y;
+    int pw, ph;
 
     GetClientRect(g_main, &rc);
     SendMessageW(g_status, WM_SIZE, 0, 0);
@@ -1208,17 +1217,52 @@ static void layout(void)
 
     MoveWindow(g_tab, 0, 0, w, h, TRUE);
 
-    /* button column on the right of the tab body */
+    /* The page controls are children of the tab, so their coordinates are
+     * relative to the TAB's client area, not the main window. TabCtrl_AdjustRect
+     * converts the tab's full rect into the usable display area below the tab
+     * row - that's where content belongs. */
+    GetClientRect(g_tab, &page);
+    TabCtrl_AdjustRect(g_tab, FALSE, &page);
+    pw = page.right - page.left;
+    ph = page.bottom - page.top;
+
+    /* button column on the right of the page area */
     for (i = 0; i < 5; i++) {
-        y = 40 + i * (btnh + 6);
-        MoveWindow(g_btn[i], w - btnw - pad - 4, y, btnw, btnh, TRUE);
+        y = page.top + 6 + i * (btnh + 6);
+        MoveWindow(g_btn[i], page.right - btnw - pad, y, btnw, btnh, TRUE);
     }
-    MoveWindow(g_list, pad, 34, w - btnw - pad*3 - 8, h - 34 - 28 - pad, TRUE);
-    MoveWindow(g_prog, pad, h - 26 - pad + 4, w - btnw - pad*3 - 8, 18, TRUE);
+    MoveWindow(g_list, page.left + pad, page.top + 6,
+               pw - btnw - pad*3, ph - 6 - 26 - pad, TRUE);
+    MoveWindow(g_prog, page.left + pad, page.top + ph - 26,
+               pw - btnw - pad*3, 18, TRUE);
     fit_columns();
 }
 
 /* ------------------------------ wndproc ------------------------------ */
+
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+
+/* The page controls (list, buttons, progress bar) are children of the tab
+ * control now, so their WM_COMMAND / WM_NOTIFY messages go to the TAB, not to
+ * the main window. Subclass the tab and forward those up so all the existing
+ * handling in WndProc keeps working unchanged. */
+static WNDPROC g_tabproc_old;
+
+static LRESULT CALLBACK TabProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_COMMAND:
+    case WM_NOTIFY:
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORSTATIC:
+        /* g_main is assigned after CreateWindowExW returns, so during the
+         * initial WM_CREATE it may still be NULL. Fall back to the tab's real
+         * parent in that window rather than dropping the message. */
+        if (g_main) return SendMessageW(g_main, msg, wp, lp);
+        return SendMessageW(GetParent(h), msg, wp, lp);
+    }
+    return CallWindowProcW(g_tabproc_old, h, msg, wp, lp);
+}
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -1254,28 +1298,40 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         ti.pszText = L"System";      TabCtrl_InsertItem(g_tab, 5, &ti);
         ti.pszText = L"Definitions"; TabCtrl_InsertItem(g_tab, 6, &ti);
 
+        /* Page controls are children of the TAB CONTROL, not of the main
+         * window. This is the standard Win32 tab pattern: the tab owns its
+         * content area, so it knows the controls are there and paints around
+         * them. The previous layout made them siblings floating on top of the
+         * tab, which meant the tab repainted over them - the listview would go
+         * blank until something forced it to redraw (a scan, a tab switch, or
+         * dragging a window across it). */
         g_list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, NULL,
                     WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL |
                     LVS_SHOWSELALWAYS | WS_TABSTOP,
-                    0, 0, 0, 0, hwnd, (HMENU)IDC_LIST, g_inst, NULL);
+                    0, 0, 0, 0, g_tab, (HMENU)IDC_LIST, g_inst, NULL);
         ListView_SetExtendedListViewStyle(g_list,
             LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
         SendMessageW(g_list, WM_SETFONT, (WPARAM)g_font, TRUE);
 
         g_prog = CreateWindowExW(0, PROGRESS_CLASSW, NULL,
                     WS_CHILD | WS_VISIBLE | PBS_MARQUEE,
-                    0, 0, 0, 0, hwnd, (HMENU)IDC_PROGRESS, g_inst, NULL);
+                    0, 0, 0, 0, g_tab, (HMENU)IDC_PROGRESS, g_inst, NULL);
 
         for (i = 0; i < 5; i++) {
             g_btn[i] = CreateWindowExW(0, L"BUTTON", L"",
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                        0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)(IDC_BTN1 + i), g_inst, NULL);
+                        0, 0, 0, 0, g_tab, (HMENU)(INT_PTR)(IDC_BTN1 + i), g_inst, NULL);
             SendMessageW(g_btn[i], WM_SETFONT, (WPARAM)g_font, TRUE);
         }
 
         g_status = CreateWindowExW(0, STATUSCLASSNAMEW, NULL,
                     WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
                     0, 0, 0, 0, hwnd, (HMENU)IDC_STATUS, g_inst, NULL);
+
+        /* now that the page controls exist under g_tab, subclass the tab so
+         * their notifications reach WndProc */
+        g_tabproc_old = (WNDPROC)SetWindowLongPtrW(g_tab, GWLP_WNDPROC,
+                                                   (LONG_PTR)TabProc);
         parts[0] = 420; parts[1] = 620; parts[2] = -1;
         SendMessageW(g_status, SB_SETPARTS, 3, (LPARAM)parts);
         SendMessageW(g_status, WM_SETFONT, (WPARAM)g_font, TRUE);
