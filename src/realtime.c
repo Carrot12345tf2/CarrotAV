@@ -110,15 +110,29 @@ static const char *rt_check(const wchar_t *path, char *hbuf, int hsz)
         }
     }
 
-    if (hash_file_md5(path, md5, &sz)) {
-        if (known_good_hash(md5)) return NULL;   /* legit installer scaffolding */
-        /* verified = unchanged at this path; skip it rather than fight a
-         * bad signature over a file we know has not been touched */
-        if (base_check_path(path, md5) == BASE_CLEAN) return NULL;
-        if (wfp_trusted(path, md5)) return NULL;
-        hit = sigdb_match_hash(g_rt.db, md5, sz);
+    {
+        BOOL readok;
+        hit = eng_match_file(g_rt.db, path, md5, &sz, &readok);
+        if (readok) {
+            if (known_good_hash(md5)) return NULL;   /* legit installer scaffolding */
+            /* verified = unchanged at this path; skip it rather than fight a
+             * bad signature over a file we know has not been touched */
+            if (base_check_path(path, md5) == BASE_CLEAN) return NULL;
+            if (wfp_trusted(path, md5)) return NULL;
+        }
     }
-    if (hit) return hit;
+    if (hit) {
+        /* The shield acts on its own, so it must never quarantine a file
+         * Microsoft genuinely signed over what is almost certainly a bad
+         * signature. Anything else signed still gets caught. */
+        wchar_t who[128];
+        if (trust_file(path, who, 128) == TRUST_MICROSOFT) {
+            log_line(L"TRUST  shield left %s alone: matched %S but signed by %s",
+                     path, hit, who);
+            return NULL;
+        }
+        return hit;
+    }
 
     fh = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                      NULL, OPEN_EXISTING, 0, NULL);
@@ -126,8 +140,15 @@ static const char *rt_check(const wchar_t *path, char *hbuf, int hsz)
         ReadFile(fh, head, sizeof(head) - 1, &rd, NULL);
         head[rd] = 0;
         CloseHandle(fh);
-        if (rd && heur_check(path, head, rd, sz, hbuf, hsz) >= 0)
+        if (rd && heur_check(path, head, rd, sz, hbuf, hsz) >= 0) {
+            wchar_t who[128];
+            if (trust_file(path, who, 128) != TRUST_NONE) {
+                log_line(L"TRUST  shield: %s tripped %S but is signed by %s - ignored",
+                         path, hbuf, who);
+                return NULL;
+            }
             return hbuf;
+        }
     }
     return NULL;
 }
@@ -417,13 +438,13 @@ BOOL rt_start(HWND notify, SIGDB *db)
     g_rt.stopev     = CreateEventW(NULL, TRUE, FALSE, NULL);
 
     /* hot trees, in priority order */
-    if (SHGetFolderPathW(NULL, CSIDL_PROFILE, NULL, 0, p) == S_OK) {
+    if (compat_folder_path(CSIDL_PROFILE, p) == S_OK) {
         PathRemoveBackslashW(p); add_watch(p);
     }
     if (GetTempPathW(MAX_PATH, p)) { PathRemoveBackslashW(p); add_watch(p); }
     if (GetSystemDirectoryW(p, MAX_PATH))  add_watch(p);
-    if (SHGetFolderPathW(NULL, CSIDL_COMMON_STARTUP, NULL, 0, p) == S_OK) add_watch(p);
-    if (SHGetFolderPathW(NULL, CSIDL_COMMON_APPDATA, NULL, 0, p) == S_OK) add_watch(p);
+    if (compat_folder_path(CSIDL_COMMON_STARTUP, p) == S_OK) add_watch(p);
+    if (compat_folder_path(CSIDL_COMMON_APPDATA, p) == S_OK) add_watch(p);
 
     g_rt.proc_thread = CreateThread(NULL, 0, proc_thread, NULL, 0, &tid);
     g_rt.reg_thread  = CreateThread(NULL, 0, reg_thread,  NULL, 0, &tid);

@@ -213,6 +213,243 @@ static void page_mon(void)
                st.active ? L"ACTIVE" : L"stopped", st.checked, st.blocked);
 }
 
+/* ---------------- Windows 2000 firewall page ----------------
+ * Shown instead of the XP firewall controls when the Windows Firewall API is
+ * absent but the 2000 packet filter is available. */
+static int g_fw2k_row0 = -1;        /* list row of the first port rule */
+static BOOL prompt_text(const wchar_t *title, const wchar_t *label,
+                        wchar_t *buf, int cch);
+
+/* ---------------- themes ----------------
+ * Only what CarrotAV draws itself can be themed: the list's background, text
+ * and alternating rows. Tabs, buttons and the window frame are drawn by
+ * Windows and stay native - there is no visual-styles API on Windows 2000 at
+ * all, which is why the Theme menu is removed there rather than shown broken.
+ * CLASSIC keeps the system colours, i.e. exactly how CarrotAV has always
+ * looked, and is the default. */
+typedef struct {
+    const wchar_t *name;
+    BOOL    system;          /* use the OS colours (Classic) */
+    COLORREF bk, txt, alt;
+} THEME;
+
+static const THEME g_themes[] = {
+    { L"Classic", TRUE,  0, 0, 0 },
+    { L"Aero",    FALSE, RGB(244,249,255), RGB(18,38,58),  RGB(228,239,252) },
+    { L"Green",   FALSE, RGB(245,251,245), RGB(20,48,26),  RGB(228,243,229) },
+    { L"Autumn",  FALSE, RGB(255,248,240), RGB(60,34,10),  RGB(250,234,214) },
+};
+#define N_THEMES ((int)(sizeof(g_themes)/sizeof(g_themes[0])))
+static int g_theme = 0;
+
+static void theme_apply(void)
+{
+    const THEME *t = &g_themes[g_theme];
+    COLORREF bk  = t->system ? GetSysColor(COLOR_WINDOW)     : t->bk;
+    COLORREF txt = t->system ? GetSysColor(COLOR_WINDOWTEXT) : t->txt;
+    HMENU m = GetMenu(g_main);
+
+    ListView_SetBkColor(g_list, bk);
+    ListView_SetTextBkColor(g_list, bk);
+    ListView_SetTextColor(g_list, txt);
+    InvalidateRect(g_list, NULL, TRUE);
+    if (m) CheckMenuRadioItem(m, IDM_THEME_CLASSIC, IDM_THEME_AUTUMN,
+                              IDM_THEME_CLASSIC + g_theme, MF_BYCOMMAND);
+}
+
+static void theme_set(int i)
+{
+    HKEY k;
+    DWORD v;
+    if (i < 0 || i >= N_THEMES) return;
+    g_theme = i;
+    v = (DWORD)i;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\CarrotAV", 0, NULL, 0,
+                        KEY_SET_VALUE, NULL, &k, NULL) == ERROR_SUCCESS) {
+        RegSetValueExW(k, L"Theme", 0, REG_DWORD, (const BYTE*)&v, sizeof(v));
+        RegCloseKey(k);
+    }
+    theme_apply();
+}
+
+static void theme_load(void)
+{
+    HKEY k;
+    DWORD v = 0, sz = sizeof(v), type;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\CarrotAV", 0, KEY_READ, &k)
+            == ERROR_SUCCESS) {
+        if (RegQueryValueExW(k, L"Theme", NULL, &type, (BYTE*)&v, &sz) != ERROR_SUCCESS)
+            v = 0;
+        RegCloseKey(k);
+    }
+    if (v >= (DWORD)N_THEMES) v = 0;
+    g_theme = (int)v;
+}
+
+/* Windows 2000 has no visual styles, and the user asked for no theme options
+ * there, so drop the whole submenu rather than leaving dead entries. */
+static void theme_menu_for_os(void)
+{
+    HMENU bar = GetMenu(g_main), opt = NULL, sub;
+    int i, n;
+    if (os_kind() == OS_XP || os_kind() == OS_NEWER) return;
+    if (!bar) return;
+    n = GetMenuItemCount(bar);
+    for (i = 0; i < n && !opt; i++) {
+        sub = GetSubMenu(bar, i);
+        if (sub && GetMenuState(sub, IDM_OPT_HEUR, MF_BYCOMMAND) != (UINT)-1)
+            opt = sub;
+    }
+    if (!opt) return;
+    n = GetMenuItemCount(opt);
+    for (i = 0; i < n; i++) {
+        sub = GetSubMenu(opt, i);
+        if (sub && GetMenuItemID(sub, 0) == IDM_THEME_CLASSIC) {
+            DeleteMenu(opt, i, MF_BYPOSITION);
+            DrawMenuBar(g_main);
+            return;
+        }
+    }
+}
+
+static void page_fw2k(void)
+{
+    const FW2KPORT *pp;
+    int n = fw2k_ports(&pp), i, r, allow = (fw2k_method() == FW2K_TCPIP);
+    wchar_t v[64], d[256];
+
+    list_columns(L"Rule", 210, L"Status", 180, L"Detail", 480, NULL, 0);
+    list_clear();
+
+    if (!fw2k_enabled()) {
+        list_add(L"Firewall", L"Off",
+                 allow ? L"All inbound connections are allowed"
+                       : L"The ports below are NOT being blocked", NULL);
+    } else if (allow) {
+        list_add(L"Firewall", fw2k_reboot_needed() ? L"On after restart" : L"On",
+                 L"Only the inbound TCP ports listed below are allowed in", NULL);
+    } else if (fw2k_bound() > 0) {
+        wsprintfW(d, L"Packet filter active on %d network address(es)", fw2k_bound());
+        list_add(L"Firewall", L"On", d, NULL);
+    } else if (fw2k_error()) {
+        wsprintfW(d, L"Could not start the packet filter (error %lu)%s", fw2k_error(),
+                  fw2k_error() == ERROR_ACCESS_DENIED
+                      ? L" - run CarrotAV as an administrator" : L"");
+        list_add(L"Firewall", L"Error", d, NULL);
+    } else {
+        list_add(L"Firewall", L"On (waiting)",
+                 L"No network connection yet - rules apply when one appears", NULL);
+    }
+
+    if (allow) {
+        list_add(L"Method", L"Windows 2000 TCP/IP filtering",
+                 L"Built into Windows. Saved in the registry, so it survives restarts", NULL);
+        list_add(L"Inbound UDP", L"Allowed",
+                 L"Left open on purpose: filtering UDP here breaks DNS and DHCP", NULL);
+        list_add(L"Outgoing", L"Unaffected",
+                 L"Your own connections out - browsing, downloads - are never filtered", NULL);
+        if (fw2k_reboot_needed())
+            list_add(L"Restart", L"Needed",
+                     L"Windows applies TCP/IP filtering when it starts", NULL);
+    } else {
+        list_add(L"Method", L"Packet filter",
+                 L"Applies instantly, and only while CarrotAV is running", NULL);
+    }
+    list_add(L"Per-program rules", L"Not available currently",
+             L"A packet filter can't tell which program owns the traffic", NULL);
+
+    g_fw2k_row0 = -1;
+    for (i = 0; i < n; i++) {
+        wsprintfW(v, L"%s %d", pp[i].tcp ? L"TCP" : L"UDP", pp[i].port);
+        wsprintfW(d, L"%s%s", fw2k_port_name(pp[i].port, pp[i].tcp),
+                  fw2k_listening(pp[i].port, pp[i].tcp)
+                      ? L"  (a service is listening here)" : L"");
+        r = list_add(v, !fw2k_enabled() ? L"Not enforced"
+                        : allow ? L"Allowed in" : L"Blocked (inbound)", d, NULL);
+        if (i == 0) g_fw2k_row0 = r;
+    }
+    if (allow && n == 0)
+        list_add(L"(nothing allowed)", fw2k_enabled() ? L"All inbound blocked" : L"-",
+                 L"Use \"Allow a port\" if something on this PC must be reachable", NULL);
+
+    set_buttons(fw2k_enabled() ? L"Turn firewall &off" : L"Turn firewall &on",
+                allow ? L"&Allow a port..." : L"&Block a port...",
+                L"&Remove selected", L"Restore &defaults", NULL);
+    set_status(L"Firewall %s - %d %s port rule(s).", fw2k_enabled() ? L"on" : L"off",
+               n, allow ? L"allowed" : L"blocked");
+}
+
+static void fw2k_button(int idx)
+{
+    const FW2KPORT *pp;
+    int n = fw2k_ports(&pp);
+
+    if (idx == 0) {
+        BOOL turning_on = !fw2k_enabled();
+        if (fw2k_method() == FW2K_TCPIP && turning_on &&
+            MessageBoxW(g_main,
+                L"Turn on Windows 2000 TCP/IP filtering?\n\n"
+                L"Only the inbound TCP ports you list stay reachable. Your own "
+                L"outgoing connections are unaffected.\n\n"
+                L"Windows applies this when it starts, so it takes effect after a "
+                L"restart - and you can turn it off here at any time.",
+                AV_NAME, MB_ICONQUESTION | MB_YESNO) != IDYES)
+            return;
+        if (!fw2k_set_enabled(turning_on)) {
+            wchar_t m[200];
+            wsprintfW(m, L"Could not start the packet filter (error %lu).\n\n"
+                         L"Run CarrotAV as an administrator.", fw2k_error());
+            MessageBoxW(g_main, m, AV_NAME, MB_ICONERROR);
+        }
+    } else if (idx == 1) {
+        wchar_t buf[32] = L"";
+        const wchar_t *p;
+        BOOL tcp = TRUE;
+        int port = 0;
+        if (!prompt_text(fw2k_method() == FW2K_TCPIP ? L"Allow a port" : L"Block a port",
+                         fw2k_method() == FW2K_TCPIP
+                             ? L"Inbound TCP port to allow, e.g.  139"
+                             : L"Port to block, e.g.  3389  or  UDP 1900", buf, 32))
+            return;
+        p = buf;
+        while (*p == L' ') p++;
+        if (!StrCmpNIW(p, L"udp", 3)) { tcp = FALSE; p += 3; }
+        else if (!StrCmpNIW(p, L"tcp", 3)) p += 3;
+        while (*p == L' ' || *p == L':') p++;
+        while (*p >= L'0' && *p <= L'9') port = port * 10 + (*p++ - L'0');
+        if (port <= 0 || port > 65535) {
+            MessageBoxW(g_main, L"That isn't a valid port number (1-65535).",
+                        AV_NAME, MB_ICONWARNING);
+            return;
+        }
+        /* Windows 2000 uses local ports 1025-5000 for its OWN outgoing
+         * connections, so blocking inbound there can break browsing. */
+        if (fw2k_method() == FW2K_PF && port >= 1025 && port <= 5000 &&
+            MessageBoxW(g_main,
+                L"Windows 2000 uses ports 1025-5000 for your own outgoing\n"
+                L"connections (web browsing, downloads).\n\n"
+                L"Blocking one of them can make some connections fail at random.\n"
+                L"Block it anyway?", AV_NAME, MB_ICONWARNING | MB_YESNO) != IDYES)
+            return;
+        fw2k_add_port(port, tcp);
+    } else if (idx == 2) {
+        int sel = ListView_GetNextItem(g_list, -1, LVNI_SELECTED);
+        if (g_fw2k_row0 < 0 || sel < g_fw2k_row0 || sel >= g_fw2k_row0 + n) {
+            MessageBoxW(g_main, L"Select a port rule in the list first.",
+                        AV_NAME, MB_ICONINFORMATION);
+            return;
+        }
+        fw2k_remove_port(pp[sel - g_fw2k_row0].port, pp[sel - g_fw2k_row0].tcp);
+    } else if (idx == 3) {
+        if (MessageBoxW(g_main, fw2k_method() == FW2K_TCPIP
+                    ? L"Clear the list, so no inbound connections are allowed?"
+                    : L"Replace your port rules with CarrotAV's defaults?",
+                        AV_NAME, MB_ICONQUESTION | MB_YESNO) != IDYES) return;
+        fw2k_restore_defaults();
+    }
+    page_fw2k();
+}
+
 static void page_fw(void)
 {
     FWSTATE st;
@@ -221,6 +458,27 @@ static void page_fw(void)
     wchar_t v[256];
 
     if (g_fwapps) { LocalFree(g_fwapps); g_fwapps = NULL; }
+
+    /* The Windows Firewall COM API arrived with XP SP2. On Windows 2000 and
+     * NT 4.0 there is no built-in firewall for us to drive at all, so say so
+     * plainly rather than showing controls that would silently do nothing -
+     * a firewall page that looks active but isn't is worse than none. */
+    if (!os_has_firewall()) {
+        if (fw2k_available()) { page_fw2k(); return; }
+        list_columns(L"Item", 250, L"Status", 200, L"Detail", 420, NULL, 0);
+        list_clear();
+        list_add(L"Firewall control", L"Not available currently",
+                 L"This version of Windows has no built-in firewall for CarrotAV to control", NULL);
+        list_add(L"Your system", os_name(),
+                 L"Firewall support may be added for this system in a future version", NULL);
+        if (fw2k_why()[0])
+            list_add(L"Details", L"Packet filter", fw2k_why(), NULL);
+        list_add(L"Everything else", L"Fully active",
+                 L"Scanning, the real-time shield, web shield and quarantine all work normally", NULL);
+        set_buttons(NULL, NULL, NULL, NULL, NULL);
+        set_status(L"Firewall control is not available currently on %s.", os_name());
+        return;
+    }
 
     fw_get_state(&st);
 
@@ -275,6 +533,10 @@ static void page_web(void)
     list_add(L"Safety", L"Marker block", L"Only entries between the CarrotAV markers are ever touched", NULL);
     list_add(L"Heuristics", g_opt_heur ? L"Enabled" : L"Disabled",
              L"Packer entropy, double extensions, temp execs, script obfuscation", NULL);
+    list_add(L"Operating system", os_name(),
+             os_has_firewall() ? L"All CarrotAV features are available on this system"
+             : fw2k_available() ? L"Firewall uses the Windows 2000 packet filter (port rules, no per-program rules)"
+                                : L"Firewall control is not available currently on this system", NULL);
     list_add(L"Scan detections", L"You choose", L"Scans never remove files on their own - you pick what to quarantine", NULL);
     list_add(L"Live shield", L"Acts automatically", L"Real-time threats (e.g. archive bombs) are quarantined as they appear", NULL);
 
@@ -341,13 +603,17 @@ static void page_update(void)
     lstrcatW(dbpath, L"\\defs\\carrot.cdb");
 
     list_add(L"Product", AV_NAME L" " AV_VERSION, NULL, NULL);
-    list_add(L"Engine", L"CarrotAV Engine 1.0 (MD5 + pattern + heuristic)", NULL, NULL);
+    list_add(L"Engine", L"CarrotAV Engine 2.0 (MD5 + SHA-256 + PE section + heuristic + signature trust)", NULL, NULL);
     list_add(L"Definition file", dbpath, NULL, NULL);
 
     if (g_db.loaded) {
-        wsprintfW(v, L"%u hash + %u pattern = %u signatures",
-                  g_db.hdr.nhash, g_db.hdr.npat, sigdb_count(&g_db));
+        wsprintfW(v, L"%u signatures", sigdb_count(&g_db));
         list_add(L"Signatures loaded", v, NULL, NULL);
+        wsprintfW(v, L"%u file MD5, %u file SHA-256, %u PE section, %u pattern",
+                  g_db.hdr.nhash, g_db.hdr2.nsha, g_db.hdr2.nsect, g_db.hdr.npat);
+        list_add(L"Breakdown", v, NULL, NULL);
+        if (g_db.hdr.version < 2)
+            list_add(L"Definition format", L"Old (v1) - click \"Check for updates\" to get SHA-256 and section signatures", NULL, NULL);
     } else {
         list_add(L"Signatures loaded", L"NONE - definition file missing or corrupt", NULL, NULL);
     }
@@ -416,7 +682,11 @@ static INT_PTR CALLBACK prompt_proc(HWND dlg, UINT m, WPARAM w, LPARAM l)
 static BOOL prompt_text(const wchar_t *title, const wchar_t *label,
                         wchar_t *buf, int cch)
 {
-    /* DLGTEMPLATE built by hand so we need no dialog resource */
+    /* DLGTEMPLATE built by hand so we need no dialog resource.
+     * Each control is: style, exstyle, x, y, cx, cy, id (one WORD), then the
+     * class. An earlier version wrote an extra 0 after the id, which Windows
+     * read as an empty class name - no control could be created, and the
+     * whole dialog silently failed to open on every version of Windows. */
     static WORD tmpl[512];
     WORD *p = tmpl;
     INT_PTR r;
@@ -433,19 +703,19 @@ static BOOL prompt_text(const wchar_t *title, const wchar_t *label,
     #define ALIGN4(q) q = (WORD*)(((ULONG_PTR)(q) + 3) & ~(ULONG_PTR)3)
     ALIGN4(p);
     *(DWORD*)p = WS_CHILD|WS_VISIBLE; p += 2; *(DWORD*)p = 0; p += 2;
-    *p++ = 8; *p++ = 8; *p++ = 204; *p++ = 16; *p++ = 200; *p++ = 0;
+    *p++ = 8; *p++ = 8; *p++ = 204; *p++ = 16; *p++ = 200;
     *p++ = 0xFFFF; *p++ = 0x0082; *p++ = 0; *p++ = 0;
 
     ALIGN4(p);
     *(DWORD*)p = WS_CHILD|WS_VISIBLE|WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL; p += 2;
     *(DWORD*)p = 0; p += 2;
-    *p++ = 8; *p++ = 26; *p++ = 204; *p++ = 14; *p++ = 201; *p++ = 0;
+    *p++ = 8; *p++ = 26; *p++ = 204; *p++ = 14; *p++ = 201;
     *p++ = 0xFFFF; *p++ = 0x0081; *p++ = 0; *p++ = 0;
 
     ALIGN4(p);
     *(DWORD*)p = WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON; p += 2;
     *(DWORD*)p = 0; p += 2;
-    *p++ = 116; *p++ = 48; *p++ = 44; *p++ = 14; *p++ = IDOK; *p++ = 0;
+    *p++ = 116; *p++ = 48; *p++ = 44; *p++ = 14; *p++ = IDOK;
     *p++ = 0xFFFF; *p++ = 0x0080;
     wcscpy((wchar_t*)p, L"OK"); p += 3; *p++ = 0;
 
@@ -510,7 +780,8 @@ static void start_scan_path(int mode, const wchar_t *target)
     g_job.archives   = g_arcguard;
     lstrcpynW(g_job.root, root, MAX_PATH);
 
-    SendMessageW(g_prog, PBM_SETMARQUEE, TRUE, 40);
+    SendMessageW(g_prog, PBM_SETPOS, 0, 0);
+    SetTimer(g_main, 2, 200, NULL);      /* drives the progress bar */
 
     g_thread = CreateThread(NULL, 0, scan_thread, &g_job, 0, &tid);
     if (!g_thread) {
@@ -953,6 +1224,10 @@ static void do_button(int idx)
 
     case TAB_FW: {
         FWSTATE st;
+        if (!os_has_firewall()) {
+            if (fw2k_available()) fw2k_button(idx);
+            return;
+        }
         fw_get_state(&st);
         if (idx == 0) {
             if (!fw_set(st.enabled != 1))
@@ -1313,9 +1588,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
         SendMessageW(g_list, WM_SETFONT, (WPARAM)g_font, TRUE);
 
+        /* A plain filling progress bar, NOT PBS_MARQUEE: marquee mode is
+         * XP-only and simply sits motionless on Windows 2000. A real bar
+         * works everywhere and actually tells the user how far along the
+         * scan is. */
         g_prog = CreateWindowExW(0, PROGRESS_CLASSW, NULL,
-                    WS_CHILD | WS_VISIBLE | PBS_MARQUEE,
+                    WS_CHILD | WS_VISIBLE,
                     0, 0, 0, 0, g_tab, (HMENU)IDC_PROGRESS, g_inst, NULL);
+        SendMessageW(g_prog, PBM_SETRANGE32, 0, 1000);
+        SendMessageW(g_prog, PBM_SETPOS, 0, 0);
 
         for (i = 0; i < 5; i++) {
             g_btn[i] = CreateWindowExW(0, L"BUTTON", L"",
@@ -1392,6 +1673,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_NOTIFY: {
         LPNMHDR nh = (LPNMHDR)lp;
+        if (nh->idFrom == IDC_LIST && nh->code == NM_CUSTOMDRAW &&
+            !g_themes[g_theme].system) {
+            NMLVCUSTOMDRAW *cd = (NMLVCUSTOMDRAW*)lp;
+            if (cd->nmcd.dwDrawStage == CDDS_PREPAINT)
+                return CDRF_NOTIFYITEMDRAW;
+            if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                /* tint every other row so long lists stay readable */
+                cd->clrTextBk = (cd->nmcd.dwItemSpec & 1)
+                                  ? g_themes[g_theme].alt : g_themes[g_theme].bk;
+                cd->clrText   = g_themes[g_theme].txt;
+                return CDRF_NEWFONT;
+            }
+            return CDRF_DODEFAULT;
+        }
         if (nh->idFrom == IDC_TAB && nh->code == TCN_SELCHANGE) {
             show_page(TabCtrl_GetCurSel(g_tab));
             return 0;
@@ -1452,6 +1747,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                           g_opt_closetray ? MF_CHECKED : MF_UNCHECKED);
             return 0;
         }
+        case IDM_THEME_CLASSIC:
+        case IDM_THEME_AERO:
+        case IDM_THEME_GREEN:
+        case IDM_THEME_AUTUMN:
+            theme_set(LOWORD(wp) - IDM_THEME_CLASSIC);
+            return 0;
         case IDM_OPT_AUTORUN: {
             BOOL on = !g_autostart_on();
             g_autostart_set(on);
@@ -1566,6 +1867,32 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_TIMER:
         if (wp == 1 && g_page == TAB_MON && rt_active()) page_mon();
+        if (wp == 1) fw2k_tick();
+        if (wp == 2) {
+            /* Drive the progress bar from the scan's own counters. While the
+             * pre-count is still running we don't know the total yet, so show
+             * a small crawl rather than a frozen bar; once total is known the
+             * bar tracks files/total. */
+            LONG done = g_job.files, total = g_job.total;
+            int pos;
+            if (g_job.counting || total <= 0) {
+                pos = 20;                       /* "working on it" */
+            } else {
+                double f = (double)done / (double)total;
+                if (f > 1.0) f = 1.0;           /* estimate can undershoot */
+                pos = (int)(f * 1000.0);
+            }
+            SendMessageW(g_prog, PBM_SETPOS, pos, 0);
+            if (g_job.running) {
+                if (g_job.counting)
+                    set_status(L"Estimating scan size...");
+                else if (total > 0)
+                    set_status(L"Scanning... %ld of ~%ld files (%d%%)",
+                               done, total, pos / 10);
+                else
+                    set_status(L"Scanning... %ld files", done);
+            }
+        }
         return 0;
 
     case WM_SCAN_HIT:
@@ -1597,7 +1924,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         DWORD secs = (GetTickCount() - g_job.started) / 1000;
         if (g_job.mode == SCAN_BASELINE) {
             base_load();
-            SendMessageW(g_prog, PBM_SETMARQUEE, FALSE, 0);
+            KillTimer(hwnd, 2); SendMessageW(g_prog, PBM_SETPOS, 0, 0);
             EnableWindow(g_btn[4], FALSE);
             if (g_thread) { CloseHandle(g_thread); g_thread = NULL; }
             SendMessageW(g_status, SB_SETTEXTW, 2, (LPARAM)L"");
@@ -1611,7 +1938,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             show_page(TAB_SYS);
             return 0;
         }
-        SendMessageW(g_prog, PBM_SETMARQUEE, FALSE, 0);
+        KillTimer(hwnd, 2); SendMessageW(g_prog, PBM_SETPOS, 0, 0);
         EnableWindow(g_btn[4], FALSE);
         if (g_thread) { CloseHandle(g_thread); g_thread = NULL; }
         SendMessageW(g_status, SB_SETTEXTW, 2, (LPARAM)L"");
@@ -1703,6 +2030,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
 
     case WM_DESTROY:
+        fw2k_stop();
         tray_remove();
         KillTimer(hwnd, 1);
         if (g_events) free(g_events);
@@ -1738,6 +2066,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmdline, int show)
      * before this so the installer and logon paths still work. A plain
      * user double-click has no switch and hits this guard. */
     if (!cmdline || (!StrStrIW(cmdline, L"/exitnow") &&
+                     !StrStrIW(cmdline, L"/clearhosts") &&
+                     !StrStrIW(cmdline, L"/fwrestore") &&
                      !StrStrIW(cmdline, L"/importhosts") &&
                      !StrStrIW(cmdline, L"/background") &&
                      !StrStrIW(cmdline, L"/quick") &&
@@ -1785,16 +2115,43 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmdline, int show)
     }
 
     /* Silent helper used by the uninstaller: strip our HOSTS block and exit. */
+    /* Uninstaller calls this so CarrotAV never leaves a machine filtered. */
+    if (cmdline && StrStrIW(cmdline, L"/fwrestore")) {
+        fw2k_restore_permit_all();
+        return 0;
+    }
+
     if (cmdline && StrStrIW(cmdline, L"/clearhosts")) {
         return hosts_clear() ? 0 : 1;
+    }
+
+    /* Any other "/switch" we don't recognise: exit quietly. The uninstaller
+     * and installer run CarrotAV with switches and WAIT for it to finish, so
+     * an unknown switch that fell through to opening the main window would
+     * hang them until someone closed it - or forever, if it went to the tray. */
+    if (cmdline) {
+        const wchar_t *c = cmdline;
+        while (*c == L' ') c++;
+        if (*c == L'/' &&
+            !StrStrIW(c, L"/quick") && !StrStrIW(c, L"/full") &&
+            !StrStrIW(c, L"/deep")  && !StrStrIW(c, L"/background"))
+            return 0;
     }
 
     memset(&wc, 0, sizeof(wc));
     wc.cbSize        = sizeof(wc);
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = inst;
-    wc.hIcon         = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APP));
-    wc.hIconSm       = wc.hIcon;
+    /* Load each size explicitly. Reusing the 32x32 handle for the small icon
+     * makes Windows shrink it on the fly, and Windows 2000 does that badly
+     * (mask gets dropped -> black box in the title bar and taskbar). The .ico
+     * already contains a hand-built 16x16, so ask for that one directly. */
+    wc.hIcon   = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+                                   GetSystemMetrics(SM_CXICON),
+                                   GetSystemMetrics(SM_CYICON), 0);
+    wc.hIconSm = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+                                   GetSystemMetrics(SM_CXSMICON),
+                                   GetSystemMetrics(SM_CYSMICON), 0);
     wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     wc.lpszClassName = L"CarrotAVMain";
@@ -1820,6 +2177,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmdline, int show)
     CheckMenuItem(GetMenu(g_main), IDM_OPT_CLOSETRAY, MF_CHECKED);
     if (g_autostart_on())
         CheckMenuItem(GetMenu(g_main), IDM_OPT_AUTORUN, MF_CHECKED);
+
+    theme_load();
+    theme_apply();
+    theme_menu_for_os();
+
+    /* Windows 2000: bring up the packet-filter firewall. On XP the Windows
+     * Firewall runs on its own and this is a no-op. */
+    if (!os_has_firewall()) fw2k_start();
 
     /* command line: /quick /full /deep /silent */
     if (cmdline && *cmdline) {

@@ -24,7 +24,7 @@
 #include <string.h>
 
 #define AV_NAME     L"CarrotAV"
-#define AV_VERSION  L"1.9"
+#define AV_VERSION  L"2.0"
 #define MAX_PAT     256      /* max signature pattern length in bytes  */
 #define SCAN_CHUNK  (64*1024)
 
@@ -45,30 +45,62 @@ typedef struct {
 
 typedef struct {
     char          magic[4];  /* "CAVD" */
-    unsigned int  version;   /* 1 */
+    unsigned int  version;   /* 1 or 2 */
     unsigned int  nhash;
     unsigned int  npat;
     unsigned int  patblob;   /* bytes of pattern data */
     unsigned int  nameblob;  /* bytes of name data    */
     unsigned int  built;     /* unix time of build    */
 } SIGHDR;
+
+/* Version 2 appends this right after SIGHDR. Engine 2.0 adds whole-file
+ * SHA-256 hashes and PE section MD5 hashes (ClamAV .hsb / .mdb). */
+typedef struct {
+    unsigned int  nsha;      /* SIGSHA records (whole-file SHA-256) */
+    unsigned int  nsect;     /* SIGHASH records (PE section MD5, size = raw size) */
+    unsigned int  reserved[6];
+} SIGHDR2;
+
+typedef struct {
+    unsigned char sha[32];
+    unsigned int  size;      /* 0 = any size */
+    unsigned int  nameoff;
+} SIGSHA;
+#pragma pack(pop)
+
+#pragma pack(push,1)
+/* In-memory lookup key: the first 8 bytes of a hash plus the size field.
+ * The full record (whole hash + name offset) stays on disk and is read only
+ * when a key matches, to confirm the hit and fetch the name. */
+typedef struct { unsigned char pre[8]; unsigned int size; } SIGKEY;
 #pragma pack(pop)
 
 typedef struct {
     SIGHDR         hdr;
-    SIGHASH       *hashes;   /* sorted by md5 */
+    SIGHDR2        hdr2;     /* zero for version 1 files */
+    SIGKEY        *hkeys;    /* whole-file MD5 keys, in file order (sorted) */
+    SIGKEY        *skeys;    /* PE section MD5 keys, in file order (sorted) */
+    SIGSHA        *shas;     /* whole-file SHA-256 - few, kept whole */
+    unsigned int  *sectsizes;/* distinct section sizes, sorted - lets the scanner
+                                skip hashing any section no signature could match */
+    unsigned int   nsectsizes;
     SIGPAT        *pats;
     unsigned char *patdata;
-    char          *names;
     /* first-byte dispatch buckets for pattern matching */
     unsigned int  *bucket[256];
     unsigned int   bucketn[256];
+    /* where the on-disk tables live, for confirming hits and reading names */
+    wchar_t        path[MAX_PATH];
+    DWORD          off_md5, off_sect, off_names, filesize;
     BOOL           loaded;
 } SIGDB;
 
 BOOL  sigdb_load(SIGDB *db, const wchar_t *path);
 void  sigdb_free(SIGDB *db);
 const char *sigdb_match_hash(SIGDB *db, const unsigned char md5[16], unsigned int size);
+const char *sigdb_match_sha(SIGDB *db, const unsigned char sha[32], unsigned int size);
+const char *sigdb_match_sect(SIGDB *db, const unsigned char md5[16], unsigned int size);
+BOOL  sigdb_has_sect_size(SIGDB *db, unsigned int size);
 const char *sigdb_match_buf(SIGDB *db, const unsigned char *buf, unsigned int len);
 unsigned int sigdb_count(SIGDB *db);
 
@@ -105,6 +137,8 @@ typedef struct {
     volatile LONG dirs;
     volatile LONG found;
     volatile LONG skipped;
+    volatile LONG total;     /* estimated files to scan, 0 = unknown */
+    volatile LONG counting;  /* TRUE while the pre-count pass is running */
     DWORD     started;
     BOOL      heuristics;
     BOOL      archives;
@@ -120,6 +154,17 @@ typedef struct {
 
 DWORD WINAPI scan_thread(LPVOID param);
 BOOL  hash_file_md5(const wchar_t *path, unsigned char out[16], unsigned int *size);
+
+/* ---- engine 2.0 (engine.c) ---- */
+BOOL  eng_hash_file(const wchar_t *path, unsigned char md5[16], unsigned char sha[32],
+                    BOOL want_sha, unsigned int *size);
+const char *eng_match_sections(SIGDB *db, const wchar_t *path);
+const char *eng_match_file(SIGDB *db, const wchar_t *path,
+                           unsigned char md5[16], unsigned int *size, BOOL *read_ok);
+
+/* ---- signature trust (trust.c) ---- */
+enum { TRUST_NONE = 0, TRUST_SIGNED, TRUST_MICROSOFT };
+int   trust_file(const wchar_t *path, wchar_t *signer, int cch);
 BOOL  known_good_hash(const unsigned char md5[16]);
 int   heur_check(const wchar_t *path, const unsigned char *head, DWORD headlen,
                  DWORD filesize, char *outname, int outsz);
@@ -275,6 +320,60 @@ void  rt_stop(void);
 BOOL  rt_active(void);
 void  rt_stats(RTSTATS *s);
 void  rt_set_kill(BOOL on);
+
+/* ---------------- OS compatibility ----------------
+ * CarrotAV targets the whole classic NT desktop family (NT 4.0, 2000, XP,
+ * XP x64) from ONE binary. Anything that isn't present on the oldest target
+ * must be resolved at runtime with GetProcAddress instead of imported
+ * statically - a missing static import makes the exe fail to load entirely,
+ * with no chance to fall back or explain itself. */
+
+enum {
+    OS_UNKNOWN = 0,
+    OS_NT4,
+    OS_2000,
+    OS_XP,          /* also XP x64 / 2003 */
+    OS_NEWER
+};
+
+int   os_kind(void);                 /* one of the OS_* values */
+const wchar_t *os_name(void);        /* human-readable, for the System tab */
+BOOL  os_has_wfp(void);              /* Windows File Protection / dllcache */
+BOOL  os_has_firewall(void);         /* XP SP2+ firewall COM API */
+
+/* SHGetFolderPathW lives in shell32 on XP but in shfolder.dll on 2000/NT4,
+ * so it is resolved at runtime. Same signature as the real thing. */
+HRESULT compat_folder_path(int csidl, wchar_t *out);
+
+/* ---------------- Windows 2000 firewall ----------------
+ * 2000 has no Windows Firewall; this drives the built-in iphlpapi packet
+ * filter instead. Inbound port blocking only - no per-program rules. */
+typedef struct { int port; BOOL tcp; } FW2KPORT;
+
+enum { FW2K_NONE = 0,
+       FW2K_PF,        /* iphlpapi packet filter: list = ports to BLOCK */
+       FW2K_TCPIP };   /* registry TCP/IP filtering: list = ports to ALLOW */
+
+int   fw2k_method(void);
+BOOL  fw2k_reboot_needed(void);
+void  fw2k_defaults(void);
+void  fw2k_restore_permit_all(void);
+
+BOOL  fw2k_available(void);
+const wchar_t *fw2k_why(void);      /* reason it is unavailable, "" if fine */
+void  fw2k_start(void);
+void  fw2k_stop(void);
+void  fw2k_tick(void);
+BOOL  fw2k_enabled(void);
+BOOL  fw2k_set_enabled(BOOL on);
+int   fw2k_bound(void);
+DWORD fw2k_error(void);
+int   fw2k_ports(const FW2KPORT **out);
+BOOL  fw2k_add_port(int port, BOOL tcp);
+BOOL  fw2k_remove_port(int port, BOOL tcp);
+void  fw2k_restore_defaults(void);
+BOOL  fw2k_listening(int port, BOOL tcp);
+const wchar_t *fw2k_port_name(int port, BOOL tcp);
 
 /* ---------------- misc helpers ---------------- */
 

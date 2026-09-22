@@ -56,6 +56,14 @@ BEGIN
         MENUITEM "&Close to Tray (keep shield on)", IDM_OPT_CLOSETRAY
         MENUITEM "Start &Shield at Logon",     IDM_OPT_AUTORUN
         MENUITEM SEPARATOR
+        POPUP "&Theme"
+        BEGIN
+            MENUITEM "&Classic",                   IDM_THEME_CLASSIC
+            MENUITEM "&Aero",                      IDM_THEME_AERO
+            MENUITEM "&Green",                     IDM_THEME_GREEN
+            MENUITEM "A&utumn",                    IDM_THEME_AUTUMN
+        END
+        MENUITEM SEPARATOR
         MENUITEM "View &Log",                  IDM_VIEW_LOG
     END
     POPUP "&Help"

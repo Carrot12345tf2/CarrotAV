@@ -47,7 +47,6 @@ BOOL hash_file_md5(const wchar_t *path, unsigned char out[16], unsigned int *siz
     HCRYPTHASH hh = 0;
     BYTE buf[SCAN_CHUNK];
     DWORD rd, len = 16;
-    LARGE_INTEGER li;
     BOOL ok = FALSE;
 
     if (!crypt_init()) return FALSE;
@@ -56,8 +55,18 @@ BOOL hash_file_md5(const wchar_t *path, unsigned char out[16], unsigned int *siz
                     OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (h == INVALID_HANDLE_VALUE) return FALSE;
 
-    if (GetFileSizeEx(h, &li) && size) {
-        *size = (li.QuadPart > 0xFFFFFFFFLL) ? 0xFFFFFFFFu : (unsigned int)li.QuadPart;
+    /* GetFileSizeEx is XP+. GetFileSize with a high-order word has existed
+     * since NT 3.1 and does the same job, so use it and keep one binary that
+     * runs on Windows 2000 and NT as well as XP. A missing static import makes
+     * the whole exe refuse to load, with no chance to fall back. */
+    if (size) {
+        DWORD hi = 0, lo = GetFileSize(h, &hi);
+        if (lo == INVALID_FILE_SIZE && GetLastError() != NO_ERROR) {
+            *size = 0;
+        } else {
+            unsigned __int64 full = ((unsigned __int64)hi << 32) | lo;
+            *size = (full > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (unsigned int)full;
+        }
     }
     if (!CryptCreateHash(g_prov, CALG_MD5, 0, 0, &hh)) goto done;
 
@@ -276,7 +285,7 @@ static BOOL scan_one(SCANJOB *j, const wchar_t *path, DWORD filesize)
     const char *hit;
     char hname[128];
     unsigned int sz = filesize;
-    BOOL verified;
+    BOOL verified, readok;
     HANDLE h;
     DWORD rd = 0;
     int k;
@@ -296,7 +305,10 @@ static BOOL scan_one(SCANJOB *j, const wchar_t *path, DWORD filesize)
         }
     }
 
-    if (!hash_file_md5(path, md5, &sz)) {
+    /* Engine 2.0: whole-file MD5 and SHA-256 in one read, then PE section
+     * hashes. The md5 comes back too - the baseline checks below need it. */
+    hit = eng_match_file(j->db, path, md5, &sz, &readok);
+    if (!readok) {
         InterlockedIncrement(&j->skipped);
         return FALSE;
     }
@@ -315,9 +327,21 @@ static BOOL scan_one(SCANJOB *j, const wchar_t *path, DWORD filesize)
      * bytes are unchanged, so a hit here is far more likely to be a bad
      * signature than a real infection: report it, flag the disagreement,
      * and never quarantine it automatically. */
-    hit = sigdb_match_hash(j->db, md5, sz);
     if (hit) {
-        post_hit(j, path, hit, verified ? DET_DISPUTED : DET_SIG);
+        int kind = verified ? DET_DISPUTED : DET_SIG;
+        /* A signature hit on a file Microsoft genuinely signed (or listed in
+         * a Windows catalog) is far more likely a bad signature than real
+         * malware - the msinfo32 case. Show it, never quarantine it. Files
+         * signed by anyone else still count: stolen certificates exist. */
+        if (kind == DET_SIG) {
+            wchar_t who[128];
+            if (trust_file(path, who, 128) == TRUST_MICROSOFT) {
+                kind = DET_DISPUTED;
+                log_line(L"TRUST  %s matched %S but is signed by %s - disputed",
+                         path, hit, who);
+            }
+        }
+        post_hit(j, path, hit, kind);
         return TRUE;
     }
 
@@ -342,7 +366,18 @@ static BOOL scan_one(SCANJOB *j, const wchar_t *path, DWORD filesize)
 
     if (j->heuristics && rd) {
         k = heur_check(path, head, rd, filesize, hname, sizeof(hname));
-        if (k >= 0) { post_hit(j, path, hname, k); return TRUE; }
+        if (k >= 0) {
+            /* Heuristics are educated guesses. A valid signature from any
+             * trusted publisher outweighs a guess, so drop the hit. */
+            wchar_t who[128];
+            if (trust_file(path, who, 128) != TRUST_NONE) {
+                log_line(L"TRUST  %s tripped %S but is signed by %s - ignored",
+                         path, hname, who);
+                return FALSE;
+            }
+            post_hit(j, path, hname, k);
+            return TRUE;
+        }
     }
 
     /* deep mode: full-file pattern sweep with overlap between chunks */
@@ -499,6 +534,40 @@ static void scan_run_key(SCANJOB *j, HKEY root, const wchar_t *sub)
     RegCloseKey(k);
 }
 
+/* ---- pre-count pass ----
+ * Walk the same tree the scan will, but only count files - no hashing, no
+ * signature lookups. This is fast (a directory enumeration, nothing more) and
+ * gives the progress bar a real denominator so it can fill up instead of just
+ * animating. The count is an estimate: files can appear or vanish while the
+ * real scan runs, so the bar is clamped and the scan never waits on it. */
+static void count_dir(SCANJOB *j, const wchar_t *dir, int depth)
+{
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    wchar_t pat[MAX_PATH], sub[MAX_PATH];
+
+    if (depth > 24 || j->cancel) return;
+    wsprintfW(pat, L"%s\\*", dir);
+    h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+
+    do {
+        if (j->cancel) break;
+        if (!lstrcmpW(fd.cFileName, L".") || !lstrcmpW(fd.cFileName, L"..")) continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+        wsprintfW(sub, L"%s\\%s", dir, fd.cFileName);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (path_excluded(sub)) continue;
+            if (j->mode == SCAN_QUICK && depth >= 1) continue;
+            count_dir(j, sub, depth + 1);
+        } else {
+            if (want_file(j, fd.cFileName, fd.nFileSizeLow))
+                InterlockedIncrement(&j->total);
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
 DWORD WINAPI scan_thread(LPVOID param)
 {
     SCANJOB *j = (SCANJOB*)param;
@@ -507,8 +576,36 @@ DWORD WINAPI scan_thread(LPVOID param)
     InterlockedExchange(&j->running, 1);
     j->started = GetTickCount();
     j->files = j->dirs = j->found = j->skipped = 0;
+    j->total = 0;
 
-    log_line(L"--- scan start (mode %d) ---", j->mode);
+    /* Estimate the workload first so the progress bar means something. The
+     * pre-count reuses want_file(), so it counts exactly what the scan will
+     * actually look at - not every file on disk. */
+    InterlockedExchange(&j->counting, 1);
+    switch (j->mode) {
+    case SCAN_QUICK:
+        if (GetWindowsDirectoryW(buf, MAX_PATH)) count_dir(j, buf, 0);
+        if (GetSystemDirectoryW(buf, MAX_PATH)) count_dir(j, buf, 0);
+        break;
+    case SCAN_CUSTOM:
+        if (j->root[0]) count_dir(j, j->root, 0);
+        break;
+    case SCAN_FULL:
+    case SCAN_DEEP:
+        if (GetLogicalDriveStringsW(512, drives)) {
+            for (d = drives; *d; d += lstrlenW(d) + 1) {
+                if (GetDriveTypeW(d) != DRIVE_FIXED) continue;
+                { wchar_t r[MAX_PATH]; lstrcpynW(r, d, MAX_PATH);
+                  PathRemoveBackslashW(r); count_dir(j, r, 0); }
+                if (j->cancel) break;
+            }
+        }
+        break;
+    default: break;      /* memory/startup scans are short - no estimate */
+    }
+    InterlockedExchange(&j->counting, 0);
+
+    log_line(L"--- scan start (mode %d, ~%ld files) ---", j->mode, j->total);
 
     switch (j->mode) {
     case SCAN_QUICK:
@@ -516,9 +613,9 @@ DWORD WINAPI scan_thread(LPVOID param)
         if (GetWindowsDirectoryW(buf, MAX_PATH)) walk(j, buf, 0);
         if (GetSystemDirectoryW(buf, MAX_PATH)) walk(j, buf, 0);
         if (GetTempPathW(MAX_PATH, buf)) { PathRemoveBackslashW(buf); walk(j, buf, 1); }
-        if (SHGetFolderPathW(NULL, CSIDL_STARTUP, NULL, 0, buf) == S_OK) walk(j, buf, 1);
-        if (SHGetFolderPathW(NULL, CSIDL_COMMON_STARTUP, NULL, 0, buf) == S_OK) walk(j, buf, 1);
-        if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, buf) == S_OK) walk(j, buf, 1);
+        if (compat_folder_path(CSIDL_STARTUP, buf) == S_OK) walk(j, buf, 1);
+        if (compat_folder_path(CSIDL_COMMON_STARTUP, buf) == S_OK) walk(j, buf, 1);
+        if (compat_folder_path(CSIDL_APPDATA, buf) == S_OK) walk(j, buf, 1);
         scan_run_key(j, HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run");
         scan_run_key(j, HKEY_CURRENT_USER,  L"Software\\Microsoft\\Windows\\CurrentVersion\\Run");
         break;
@@ -532,8 +629,8 @@ DWORD WINAPI scan_thread(LPVOID param)
         scan_run_key(j, HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce");
         scan_run_key(j, HKEY_CURRENT_USER,  L"Software\\Microsoft\\Windows\\CurrentVersion\\Run");
         scan_run_key(j, HKEY_CURRENT_USER,  L"Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce");
-        if (SHGetFolderPathW(NULL, CSIDL_STARTUP, NULL, 0, buf) == S_OK) walk(j, buf, 1);
-        if (SHGetFolderPathW(NULL, CSIDL_COMMON_STARTUP, NULL, 0, buf) == S_OK) walk(j, buf, 1);
+        if (compat_folder_path(CSIDL_STARTUP, buf) == S_OK) walk(j, buf, 1);
+        if (compat_folder_path(CSIDL_COMMON_STARTUP, buf) == S_OK) walk(j, buf, 1);
         break;
 
     case SCAN_BASELINE:

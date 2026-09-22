@@ -7,7 +7,7 @@ LDFLAGS = -Wl,--gc-sections -s -static-libgcc
 LIBS    = -loleaut32 -luuid -lcomctl32 -lshlwapi -lshell32 -lole32 -ladvapi32 -lcomdlg32 -lgdi32 \
           -luser32 -lkernel32 -lm
 
-SRC = src/main.c src/scan.c src/sigdb.c src/protect.c src/fw.c src/realtime.c src/baseline.c src/archive.c
+SRC = src/main.c src/scan.c src/sigdb.c src/protect.c src/fw.c src/realtime.c src/baseline.c src/archive.c src/compat.c src/fw2k.c src/engine.c src/sha256.c src/pe.c src/trust.c
 OBJ = $(SRC:.c=.o)
 RES = src/app.res
 

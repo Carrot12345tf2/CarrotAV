@@ -11,7 +11,7 @@ Var UPGRADING
 Var PREV_VER
 
 !define APPNAME    "CarrotAV"
-!define APPVER     "1.9"
+!define APPVER     "2.0"
 !define APPEXE     "carrotav.exe"
 !define REGUNINST  "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
 
@@ -64,7 +64,7 @@ Section "Scanner engine (required)" SecCore
   SectionIn RO
   SetOutPath "$INSTDIR"
   File "..\carrotav.exe"
-  File "..\README.txt"
+  File "..\README.md"
   SetOutPath "$INSTDIR\tools"
   File "..\tools\build_defs.py"
   File "..\tools\update_defs.cmd"
@@ -240,26 +240,51 @@ FunctionEnd
 
 ; ------------------------------------------------------------------
 Section "Uninstall"
+  ; 1. Stop CarrotAV first. The tray shield keeps carrotav.exe locked, and a
+  ;    locked exe makes every Delete fail silently - which then makes every
+  ;    RMDir fail because the folder isn't empty. That's why uninstall used to
+  ;    leave the whole install behind and only remove the shortcut.
+  nsExec::ExecToLog '"$INSTDIR\${APPEXE}" /exitnow'
+  Pop $0
+  StrCpy $1 0
+  ${Do}
+    FindWindow $2 "CarrotAVMain" ""
+    ${If} $2 == 0
+      ${ExitDo}
+    ${EndIf}
+    Sleep 250
+    IntOp $1 $1 + 1
+  ${LoopUntil} $1 >= 20                 ; give it up to ~5 seconds
+  Sleep 500                             ; let the process fully release the exe
+
+  ; 2. Remove our HOSTS block (only the lines between CarrotAV's markers).
   nsExec::ExecToLog '"$INSTDIR\${APPEXE}" /clearhosts'
   Pop $0
 
-  Delete "$INSTDIR\${APPEXE}"
-  Delete "$INSTDIR\README.txt"
+  ; 2b. Undo Windows 2000 TCP/IP filtering. That setting lives in the registry
+  ;     and survives reboots, so leaving it behind would filter a machine that
+  ;     no longer has CarrotAV on it.
+  nsExec::ExecToLog '"$INSTDIR\${APPEXE}" /fwrestore'
+  Pop $0
+
+  ; 3. Program files
+  Delete /REBOOTOK "$INSTDIR\${APPEXE}"
+  Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\carrotav.log"
   Delete "$INSTDIR\uninstall.exe"
-  Delete "$INSTDIR\tools\build_defs.py"
-  Delete "$INSTDIR\tools\update_defs.cmd"
-  Delete "$INSTDIR\tools\get_defs.py"
-  Delete "$INSTDIR\tools\defupdate.exe"
-  Delete "$INSTDIR\tools\cacerts.pem"
-  Delete "$INSTDIR\tools\UPDATING_TLS.txt"
-  Delete "$INSTDIR\defs\carrot.cdb"
-  Delete "$INSTDIR\defs\blocklist.txt"
-  RMDir /r "$INSTDIR\Quarantine"
-  RMDir  "$INSTDIR\tools"
-  RMDir  "$INSTDIR\defs"
-  RMDir  "$INSTDIR"
 
+  ; 4. Folders: tools, definitions (incl. baseline + exclusions the user built),
+  ;    and the quarantine vault. All created by CarrotAV, so remove them whole.
+  RMDir /r "$INSTDIR\tools"
+  RMDir /r "$INSTDIR\defs"
+  RMDir /r "$INSTDIR\Quarantine"
+
+  ; 5. The install folder itself. Deliberately NOT "RMDir /r $INSTDIR": if a
+  ;    user ever pointed the installer at a folder with their own files in it,
+  ;    we must not wipe those. Anything left over keeps the folder alive.
+  RMDir /REBOOTOK "$INSTDIR"
+
+  ; 6. Shortcuts, shell menus, autostart, registry
   Delete "$DESKTOP\${APPNAME}.lnk"
   RMDir /r "$SMPROGRAMS\${APPNAME}"
 
@@ -275,4 +300,8 @@ Section "Uninstall"
   DeleteRegKey HKLM "${REGUNINST}"
 
   System::Call 'shell32::SHChangeNotify(i 0x8000000, i 0, i 0, i 0)'
+
+  ${If} ${RebootFlag}
+    MessageBox MB_ICONINFORMATION "Some CarrotAV files were in use and will be removed the next time Windows starts."
+  ${EndIf}
 SectionEnd

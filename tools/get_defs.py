@@ -22,11 +22,13 @@ HERE     = os.path.dirname(os.path.abspath(__file__))
 OUT      = os.path.join(HERE, "carrot.cdb")
 WORK     = os.path.join(HERE, "_clamav_cache")
 
-MIRRORS  = ["https://database.clamav.net/{}", "http://database.clamav.net/{}"]
+# ClamAV's own database.clamav.net returns 403 to anything that isn't a
+# current FreshClam. Microsoft mirrors the identical .cvd files openly.
+MIRRORS  = ["https://packages.microsoft.com/clamav/{}"]
 WANT     = ["main.cvd", "daily.cvd"]
 
 MAGIC        = b"CAVD"
-FORMAT_VER   = 1
+FORMAT_VER   = 2          # engine 2.0: adds SHA-256 + PE section hashes
 MIN_PAT      = 32       # shorter literals produce false-positive floods
 MAX_PAT      = 256     # must match MAX_PAT in av.h
 MAX_PATTERNS = 0        # ndb patterns are offset/target-anchored in ClamAV;
@@ -103,13 +105,13 @@ def unpack(path):
     with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
         for m in tf.getmembers():
             if m.isfile() and m.name.lower().endswith(
-                    (".hdb", ".hsb", ".hdu", ".ndb")):
+                    (".hdb", ".hsb", ".hdu", ".hsu", ".mdb", ".mdu", ".ndb")):
                 with open(os.path.join(WORK, os.path.basename(m.name)), "wb") as f:
                     f.write(tf.extractfile(m).read())
 
 
-def parse_hashes(path, out):
-    """hdb/hsb line:  <digest>:<size>:<name>"""
+def parse_hashes(path, md5s, shas):
+    """hdb/hsb line:  <digest>:<size>:<name>   (MD5 or SHA-256; SHA-1 skipped)"""
     n = 0
     with open(path, "rb") as f:
         for line in f:
@@ -117,18 +119,39 @@ def parse_hashes(path, out):
             if not line or line.startswith(b"#"):
                 continue
             parts = line.split(b":")
-            if len(parts) < 3 or len(parts[0]) != 32:   # MD5 only
+            if len(parts) < 3 or len(parts[0]) not in (32, 64):
                 continue
             try:
                 digest = bytes.fromhex(parts[0].decode("ascii"))
+                size = 0 if parts[1] == b"*" else int(parts[1])
             except ValueError:
                 continue
-            try:
-                size = 0 if parts[1] == b"*" else int(parts[1])
-                if size > 0xFFFFFFFF:
-                    size = 0
-            except ValueError:
+            if size > 0xFFFFFFFF:
                 size = 0
+            rec = (digest, size, parts[2].decode("ascii", "replace")[:100])
+            (md5s if len(digest) == 16 else shas).append(rec)
+            n += 1
+    return n
+
+
+def parse_sections(path, out):
+    """mdb line:  <section size>:<section MD5>:<name>"""
+    n = 0
+    with open(path, "rb") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith(b"#"):
+                continue
+            parts = line.split(b":")
+            if len(parts) < 3 or len(parts[1]) != 32:
+                continue
+            try:
+                size = int(parts[0])            # "*" wildcard sizes are unusable
+                digest = bytes.fromhex(parts[1].decode("ascii"))
+            except ValueError:
+                continue
+            if not 0 < size <= 0xFFFFFFFF:
+                continue
             out.append((digest, size, parts[2].decode("ascii", "replace")[:100]))
             n += 1
     return n
@@ -163,16 +186,20 @@ def parse_patterns(path, out):
     return n
 
 
-def compile_db(hashes, patterns):
-    seen, uniq = set(), []
-    for h, size, name in hashes:
+def _uniq(recs):
+    seen, out = set(), []
+    for h, size, name in recs:
         if (h, size) in seen:
             continue
         seen.add((h, size))
-        uniq.append((h, size, name))
-    uniq.sort(key=lambda r: r[0])          # client binary-searches this
+        out.append((h, size, name))
+    out.sort(key=lambda r: (r[0], r[1]))    # client binary-searches these
+    return out
 
-    names, offsets = bytearray(), {}
+
+def compile_db(md5s, shas, sects, patterns):
+    md5s, shas, sects = _uniq(md5s), _uniq(shas), _uniq(sects)
+    names, offsets = bytearray(b"\0"), {b"\0": 0}   # offset 0 = ""
 
     def intern(text):
         b = text.encode("ascii", "replace") + b"\0"
@@ -181,9 +208,13 @@ def compile_db(hashes, patterns):
             names.extend(b)
         return offsets[b]
 
-    hash_recs = bytearray()
-    for h, size, name in uniq:
-        hash_recs += struct.pack("<16sII", h, size, intern(name))
+    recs = bytearray()
+    for h, size, name in md5s:
+        recs += struct.pack("<16sII", h, size, intern(name))
+    for h, size, name in shas:
+        recs += struct.pack("<32sII", h, size, intern(name))
+    for h, size, name in sects:
+        recs += struct.pack("<16sII", h, size, intern(name))
 
     blob, pat_recs = bytearray(), bytearray()
     for raw, name in patterns:
@@ -191,14 +222,15 @@ def compile_db(hashes, patterns):
         blob.extend(raw)
 
     with open(OUT, "wb") as f:
-        f.write(struct.pack("<4sIIIIII", MAGIC, FORMAT_VER, len(uniq),
+        f.write(struct.pack("<4sIIIIII", MAGIC, FORMAT_VER, len(md5s),
                             len(patterns), len(blob), len(names), int(time.time())))
-        f.write(hash_recs)
+        f.write(struct.pack("<8I", len(shas), len(sects), 0, 0, 0, 0, 0, 0))
+        f.write(recs)
         f.write(pat_recs)
         f.write(blob)
         f.write(names)
 
-    return len(uniq), len(patterns), len(blob), len(names)
+    return len(md5s), len(shas), len(sects), len(patterns), len(blob), len(names)
 
 
 # -------------------------------------------------------------------- main
@@ -221,11 +253,13 @@ def main():
         # Maybe the signature files are already sitting in the cache, either
         # from an earlier run or dropped in by hand. Use them if so.
         have = [f for f in os.listdir(WORK)
-                if f.lower().endswith((".hdb", ".hsb", ".hdu", ".ndb", ".cvd"))]
+                if f.lower().endswith((".hdb", ".hsb", ".hdu", ".hsu", ".mdb",
+                                       ".mdu", ".ndb", ".cvd"))]
         for f in [x for x in have if x.lower().endswith(".cvd")]:
             unpack(os.path.join(WORK, f))
         have = [f for f in os.listdir(WORK)
-                if f.lower().endswith((".hdb", ".hsb", ".hdu", ".ndb"))]
+                if f.lower().endswith((".hdb", ".hsb", ".hdu", ".hsu", ".mdb",
+                                       ".mdu", ".ndb"))]
         if not have:
             say()
             say("  Could not download anything.")
@@ -240,14 +274,16 @@ def main():
 
     say()
     say("Step 2 of 3 - parsing signatures")
-    hashes, patterns = [], []
+    md5s, shas, sects, patterns = [], [], [], []
     for fn in sorted(os.listdir(WORK)):
         p = os.path.join(WORK, fn)
         if not os.path.isfile(p):
             continue
         low = fn.lower()
-        if low.endswith((".hdb", ".hsb", ".hdu")):
-            say(f"  {fn}: {parse_hashes(p, hashes):,} hashes")
+        if low.endswith((".hdb", ".hsb", ".hdu", ".hsu")):
+            say(f"  {fn}: {parse_hashes(p, md5s, shas):,} file hashes")
+        elif low.endswith((".mdb", ".mdu")):
+            say(f"  {fn}: {parse_sections(p, sects):,} PE section hashes")
         elif low.endswith(".ndb") and MAX_PATTERNS:
             say(f"  {fn}: {parse_patterns(p, patterns):,} literal patterns")
         elif low.endswith(".ndb"):
@@ -258,22 +294,24 @@ def main():
                      b"ANTIVIRUS-TEST-FILE!$H+H*"[:MAX_PAT],
                      "Eicar-Test-Signature"))
 
-    if not hashes and not patterns:
+    if not md5s and not shas and not sects:
         say("  Nothing parsed. The downloads may be corrupt - delete")
         say(f"  {WORK} and run this again.")
         return 1
 
     say()
     say("Step 3 of 3 - compiling carrot.cdb")
-    nh, np, blob, nb = compile_db(hashes, patterns)
+    nh, ns, nsec, np, blob, nb = compile_db(md5s, shas, sects, patterns)
     size = os.path.getsize(OUT)
-    ram = (nh * 24 + np * 10 + blob + nb) / 1048576
+    ram = (nh * 24 + ns * 40 + nsec * 28 + np * 10 + blob + nb) / 1048576
 
     say()
     say("  " + "=" * 44)
     say(f"  Done.  {OUT}")
     say()
-    say(f"    {nh:,} hash signatures")
+    say(f"    {nh:,} file MD5 signatures")
+    say(f"    {ns:,} file SHA-256 signatures")
+    say(f"    {nsec:,} PE section signatures")
     say(f"    {np:,} pattern signatures")
     say(f"    {size/1048576:.1f} MB on disk")
     say(f"    ~{ram:.0f} MB RAM once loaded on the XP machine")

@@ -430,7 +430,7 @@ int main(int argc, char **argv)
             "  or the network blocks port 443 to packages.microsoft.com.");
     }
 
-    printf("\n  Step 2/3  compiling carrot.cdb (hash signatures only)\n");
+    printf("\n  Step 2/3  compiling carrot.cdb\n");
     {
         char outcdb[MAX_PATH];
         wsprintfA(outcdb, "%s\\carrot.cdb", defsdir);
