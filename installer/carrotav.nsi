@@ -11,7 +11,7 @@ Var UPGRADING
 Var PREV_VER
 
 !define APPNAME    "CarrotAV"
-!define APPVER     "2.0"
+!define APPVER     "2.0.1"
 !define APPEXE     "carrotav.exe"
 !define REGUNINST  "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
 
@@ -278,6 +278,7 @@ Section "Uninstall"
   RMDir /r "$INSTDIR\tools"
   RMDir /r "$INSTDIR\defs"
   RMDir /r "$INSTDIR\Quarantine"
+  RMDir /r "$INSTDIR\update"
 
   ; 5. The install folder itself. Deliberately NOT "RMDir /r $INSTDIR": if a
   ;    user ever pointed the installer at a folder with their own files in it,

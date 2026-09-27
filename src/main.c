@@ -871,32 +871,40 @@ static void do_load_defs(void)
 }
 
 /* Read update_check.txt written by defupdate.exe; returns the newer app tag
- * in 'tag' if one is available, else empty. */
-static void read_update_result(const wchar_t *toolsdir, wchar_t *tag, int cap)
+ * in 'tag' if one is available (else empty), and the downloaded installer's
+ * path in 'setup' if defupdate fetched it (else empty). */
+static void read_update_result(const wchar_t *toolsdir, wchar_t *tag, int cap,
+                               wchar_t *setup, int scap)
 {
     wchar_t path[MAX_PATH];
     FILE *f;
-    char line[128];
+    char line[MAX_PATH + 32];
     tag[0] = 0;
+    setup[0] = 0;
     wsprintfW(path, L"%s\\update_check.txt", toolsdir);
     f = _wfopen(path, L"r");
     if (!f) return;
     while (fgets(line, sizeof(line), f)) {
-        if (!strncmp(line, "update=", 7)) {
-            char *v = line + 7, *e = v;
-            while (*e && *e != '\r' && *e != '\n') e++;
-            *e = 0;
-            MultiByteToWideChar(CP_ACP, 0, v, -1, tag, cap);
-        }
+        char *v = NULL, *e;
+        if (!strncmp(line, "update=", 7)) v = line + 7;
+        else if (!strncmp(line, "installer=", 10)) v = line + 10;
+        if (!v) continue;
+        e = v;
+        while (*e && *e != '\r' && *e != '\n') e++;
+        *e = 0;
+        if (line[0] == 'u') MultiByteToWideChar(CP_ACP, 0, v, -1, tag, cap);
+        else                MultiByteToWideChar(CP_ACP, 0, v, -1, setup, scap);
     }
     fclose(f);
     _wremove(path);   /* one-shot */
+    if (setup[0] && GetFileAttributesW(setup) == INVALID_FILE_ATTRIBUTES) setup[0] = 0;
 }
 
 static void do_update_online(void)
 {
     wchar_t exedir[MAX_PATH], toolsdir[MAX_PATH], updater[MAX_PATH];
     wchar_t defsdir[MAX_PATH], ca[MAX_PATH], params[MAX_PATH*2], newtag[32];
+    wchar_t setup[MAX_PATH];
     SHELLEXECUTEINFOW ei;
 
     app_dir(exedir, MAX_PATH);
@@ -971,21 +979,32 @@ static void do_update_online(void)
     }
 
     /* then the app-update offer, if GitHub had a newer release */
-    read_update_result(toolsdir, newtag, 32);
-    if (newtag[0]) {
+    read_update_result(toolsdir, newtag, 32, setup, MAX_PATH);
+    if (newtag[0] && setup[0]) {
         wchar_t m[500];
         wsprintfW(m,
-            L"A newer version of CarrotAV is available.\n\n"
-            L"    You have:  %s\n    Latest:    %s\n\n"
-            L"Open the download page to get it? The installer upgrades in "
-            L"place and keeps your settings, quarantine, and definitions.",
-            AV_VERSION, newtag);
-        if (MessageBoxW(g_main, m, L"Update available",
+            L"CarrotAV %s has been downloaded.\n\n"
+            L"    You have:  %s\n    New:       %s\n\n"
+            L"Install it now? CarrotAV will close, upgrade in place, and keep "
+            L"your settings, quarantine, and definitions.",
+            newtag, AV_VERSION, newtag);
+        if (MessageBoxW(g_main, m, L"Update ready",
                         MB_ICONINFORMATION | MB_YESNO) == IDYES) {
-            ShellExecuteW(g_main, L"open",
-                L"https://github.com/Carrot12345tf2/CarrotAV/releases/latest",
-                NULL, NULL, SW_SHOWNORMAL);
+            if ((INT_PTR)ShellExecuteW(g_main, L"open", setup, NULL, NULL,
+                                       SW_SHOWNORMAL) <= 32)
+                MessageBoxW(g_main, L"Could not start the installer.",
+                            AV_NAME, MB_ICONERROR);
+            /* the installer closes this copy itself (/exitnow) */
+            return;
         }
+    } else if (newtag[0]) {
+        wchar_t m[500];
+        wsprintfW(m,
+            L"A newer version of CarrotAV (%s) is available, but the download "
+            L"did not finish.\n\n"
+            L"Run Check for Updates again to retry.",
+            newtag);
+        MessageBoxW(g_main, m, L"Update available", MB_ICONWARNING);
     }
     if (g_page == TAB_UPDATE) page_update();
 }

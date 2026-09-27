@@ -75,8 +75,8 @@ BEGIN
 END
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     1,9,0,0
-PRODUCTVERSION  1,9,0,0
+FILEVERSION     2,0,1,0
+PRODUCTVERSION  2,0,1,0
 FILEOS          VOS_NT_WINDOWS32
 FILETYPE        VFT_APP
 BEGIN
@@ -86,11 +86,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Carrot Software"
             VALUE "FileDescription",  "CarrotAV Antivirus Scanner"
-            VALUE "FileVersion",      "1.9.0.0"
+            VALUE "FileVersion",      "2.0.1.0"
             VALUE "InternalName",     "carrotav"
             VALUE "OriginalFilename", "carrotav.exe"
             VALUE "ProductName",      "CarrotAV"
-            VALUE "ProductVersion",   "1.9.0.0"
+            VALUE "ProductVersion",   "2.0.1.0"
             VALUE "LegalCopyright",   "Public domain"
         END
     END
