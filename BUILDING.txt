@@ -1,0 +1,57 @@
+BUILDING CARROTAV
+=================
+
+You can build on Windows (MSYS2) or Linux/WSL.
+
+
+ON WINDOWS
+----------
+(Untested - the official builds are made on Linux.)
+1. Install MSYS2 (msys2.org), open the "MSYS2 MINGW32" shell, and run:
+       pacman -S mingw-w64-i686-gcc make
+2. Install NSIS (nsis.sourceforge.io).
+3. In the MINGW32 shell, cd to the CarrotAV folder and run:
+       make CC=gcc WINDRES=windres
+   Output: carrotav.exe
+
+
+ON LINUX / WSL
+--------------
+1. sudo apt install gcc-mingw-w64-i686 nsis make
+2. sudo update-alternatives --set i686-w64-mingw32-gcc /usr/bin/i686-w64-mingw32-gcc-win32
+3. In the CarrotAV folder:
+       make
+   Output: carrotav.exe
+
+
+DEFINITIONS (defs\carrot.cdb)
+-----------------------------
+Not in the repo (too big). Either:
+ - run tools\get_defs.py on a modern PC with Python, or
+ - copy carrot.cdb out of an installed copy of CarrotAV.
+Put it in the defs folder.
+
+
+THE UPDATER (tools\defupdate.exe)
+---------------------------------
+A prebuilt copy already ships in tools\. Only rebuild it if you change
+updater\defupdate.c. It needs XP-patched mbedTLS 3.6.2 and zlib -
+see tools\UPDATING_TLS.txt.
+
+
+THE INSTALLER
+-------------
+Make a "dist" folder in the CarrotAV folder, then:
+ - Windows: right-click installer\carrotav.nsi -> Compile NSIS Script
+ - Linux:   cd installer && makensis carrotav.nsi
+Output: dist\CarrotAV-<version>-Setup.exe
+
+
+RELEASING
+---------
+Zip the Setup.exe as CarrotAV-<version>-Setup.zip and attach it to a
+GitHub release tagged with just the version number (no "v"), e.g. 2.0.1.
+The auto-updater depends on both.
+
+The version number lives in three places - change all of them:
+  src\av.h (AV_VERSION), src\app.rc, installer\carrotav.nsi (APPVER)
