@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CarrotAV</title>
+<meta name="description" content="CarrotAV - An antivirus for old systems.">
+<meta property="og:title" content="CarrotAV">
+<meta property="og:description" content="CarrotAV - An antivirus for old systems.">
+<meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Anton&display=swap" rel="stylesheet">
+<style>
+  /*
+    Layout mirrors the Canva design exactly: a 1366 x 1541 "stage" where every
+    element sits at its original position, size, rotation and stacking order.
+    The whole stage scales with the window width (like the Canva site does).
+    Edit positions with --x / --y / --w / --h (design pixels).
+  */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: #c1f5fc; }
+  body { font-family: 'Anton', Impact, 'Arial Narrow Bold', sans-serif; overflow-x: hidden; }
+
+  .stage {
+    width: min(100%, 1366px);
+    margin: 0 auto;
+    container-type: inline-size;
+  }
+  .canvas {
+    --u: calc(100cqw / 1366);           /* 1 design pixel */
+    position: relative;
+    height: calc(1541 * var(--u));
+    overflow: hidden;
+  }
+
+  .el {
+    position: absolute;
+    left:   calc(var(--x) * var(--u));
+    top:    calc(var(--y) * var(--u));
+    width:  calc(var(--w) * var(--u));
+    height: calc(var(--h) * var(--u));
+    display: block;
+  }
+  img.el { object-fit: fill; }
+
+  /* Text boxes */
+  .txt {
+    color: #ff751f;
+    font-size: calc(var(--fs) * var(--u));
+    line-height: calc(var(--h) * var(--u));
+    text-align: center;
+    white-space: pre;
+  }
+  a.txt {
+    text-decoration: underline;
+    text-decoration-thickness: calc(3 * var(--u));
+    text-underline-offset: calc(4 * var(--u));
+  }
+  a.txt.black { color: #000; }
+  .txt.dark { color: #fd7915; }
+
+  /* Transforms taken from the Canva page */
+  .flip-both { transform: rotate(180deg); }
+  .flip-v    { transform: scaleY(-1); }
+  .rot-logo  { transform: rotate(-33.6deg); }
+  .rot-patch { transform: rotate(-20.7deg); }
+
+  /* Divider line with diamond ends */
+  .divider { background: #ff751f; height: calc(3 * var(--u)); margin-top: calc(0.5 * var(--u)); }
+  .divider::before, .divider::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    width: calc(9 * var(--u)); height: calc(9 * var(--u));
+    border: calc(2 * var(--u)) solid #ff751f;
+    background: #c1f5fc;
+    transform: translateY(-50%) rotate(45deg);
+  }
+  .divider::before { left: 0; }
+  .divider::after  { right: 0; }
+
+  footer {
+    background: #000;
+    color: #fff;
+    font-family: system-ui, sans-serif;
+    font-size: 13px;
+    padding: 10px 16px;
+  }
+</style>
+</head>
+<body>
+
+<div class="stage">
+  <div class="canvas">
+
+    <!-- Top grass: three overlapping copies, flipped like the original -->
+    <img class="el flip-both" style="--x:0;   --y:0; --w:546; --h:148" src="grass.png" alt="">
+    <img class="el flip-both" style="--x:479; --y:0; --w:546; --h:148" src="grass.png" alt="">
+    <img class="el flip-v"    style="--x:909; --y:0; --w:546; --h:148" src="grass.png" alt="">
+
+    <!-- Logo: carrot (rotated upright) sits in the gap between "Carro" and "AV" -->
+    <img class="el rot-logo" style="--x:700.5; --y:279.5; --w:62; --h:82" src="carrot.png" alt="">
+    <h1 class="el txt" style="--x:559; --y:281; --w:247; --h:113; --fs:74.67; font-weight:400" >Carro<span style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">t</span> AV</h1>
+    <p class="el txt" style="--x:274; --y:386; --w:808; --h:64; --fs:42.67">A Windows XP™ and Windows 2000™ Antivirus</p>
+
+    <!-- Links -->
+    <a class="el" style="--x:780; --y:465; --w:95; --h:95" href="https://github.com/Carrot12345tf2/CarrotAV">
+      <img src="github.png" alt="GitHub" style="width:100%;height:100%;display:block">
+    </a>
+    <a class="el" style="--x:546; --y:465; --w:62; --h:82" href="https://github.com/Carrot12345tf2/CarrotAV/releases/latest">
+      <img src="carrot.png" alt="" style="width:100%;height:100%;display:block">
+    </a>
+    <a class="el txt" style="--x:212; --y:480; --w:321; --h:64; --fs:42.67" href="https://github.com/Carrot12345tf2/CarrotAV/releases/latest">Download CarrotAV</a>
+    <a class="el txt black" style="--x:888; --y:480; --w:262; --h:64; --fs:42.67" href="https://github.com/Carrot12345tf2/CarrotAV">CarrotAV Github</a>
+
+    <!-- Why section -->
+    <h2 class="el txt dark" style="--x:385; --y:805; --w:595; --h:113; --fs:74.67; font-weight:400">Why CarrotAV exists</h2>
+    <p class="el txt" style="--x:211; --y:925;  --w:944;  --h:64; --fs:42.67">I made CarrotAV for a reason, to protect old computers.</p>
+    <p class="el txt" style="--x:110; --y:984;  --w:1146; --h:64; --fs:42.67">With the rise of new stuff, people are forgetting about the old stuff.</p>
+    <p class="el txt" style="--x:475; --y:1043; --w:415;  --h:64; --fs:42.67">But CarrotAV is different.</p>
+
+    <div class="el divider" style="--x:0; --y:1149; --w:1366; --h:3"></div>
+
+    <p class="el txt" style="--x:552; --y:1170; --w:261; --h:64; --fs:42.67">Made with love</p>
+
+    <!-- Screenshots -->
+    <img class="el" style="--x:0;   --y:1223; --w:495; --h:312" src="screenshot-classic.png" alt="CarrotAV with the Windows Classic theme">
+    <img class="el" style="--x:871; --y:1223; --w:495; --h:311" src="screenshot-xp.png" alt="CarrotAV with the Windows XP theme">
+
+    <!-- Carrot patch: carrots first so the grass overlaps their bottoms -->
+    <img class="el rot-patch" style="--x:568.5; --y:1418.5; --w:62; --h:82" src="carrot.png" alt="">
+    <img class="el rot-patch" style="--x:651.5; --y:1439.5; --w:62; --h:82" src="carrot.png" alt="">
+    <img class="el rot-patch" style="--x:750.5; --y:1418.5; --w:62; --h:82" src="carrot.png" alt="">
+    <img class="el" style="--x:495; --y:1431; --w:376; --h:101" src="grass.png" alt="">
+
+  </div>
+</div>
+
+<footer>CarrotSoftware</footer>
+
+</body>
+</html>
