@@ -303,7 +303,10 @@ def main():
     say("Step 3 of 3 - compiling carrot.cdb")
     nh, ns, nsec, np, blob, nb = compile_db(md5s, shas, sects, patterns)
     size = os.path.getsize(OUT)
-    ram = (nh * 24 + ns * 40 + nsec * 28 + np * 10 + blob + nb) / 1048576
+    # What the engine actually keeps in RAM: a 12-byte key per MD5 and per
+    # section hash (plus a small section-size table), full SHA-256 records,
+    # and patterns. Malware names stay on disk and are read only on a hit.
+    ram = (nh * 12 + ns * 40 + nsec * 16 + np * 10 + blob) / 1048576
 
     say()
     say("  " + "=" * 44)
@@ -321,11 +324,7 @@ def main():
     say("  box (replacing the starter file), then open CarrotAV and choose")
     say("  Definitions -> Reload.")
     say()
-    if ram > 180:
-        say("  That is a big database. If the XP machine has under 512 MB of")
-        say("  RAM, edit MAX_PATTERNS near the top of this script down to")
-        say("  50000 and run it again for a lighter build.")
-        say()
+
     say(f"  The {os.path.basename(WORK)} folder is just a cache - safe to delete.")
     return 0
 

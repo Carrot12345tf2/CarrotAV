@@ -493,13 +493,19 @@ static void page_fw(void)
              L"Ignores every allow rule below - use on untrusted networks", NULL);
     list_add(L"Notifications", st.notify_off ? L"off" : L"ON",
              L"Prompt when a program first tries to listen", NULL);
+    /* Be exact about what this firewall can do: XP's firewall only ever
+     * filters traffic coming IN. It cannot stop a program connecting out. */
+    list_add(L"Inbound protection", st.enabled == 1 ? L"ON" : L"OFF",
+             L"Unsolicited connections from the network are refused", NULL);
+    list_add(L"Outbound protection", L"Not available",
+             L"The Windows XP firewall cannot filter outgoing connections", NULL);
 
     g_fwappn = fw_list_apps(&g_fwapps);
     for (i = 0; i < g_fwappn; i++) {
         wsprintfW(v, L"%s%s", g_fwapps[i].path,
                   g_fwapps[i].scope == 1 ? L"  (local subnet only)" : L"");
         list_add(g_fwapps[i].name,
-                 g_fwapps[i].enabled ? L"ALLOWED" : L"BLOCKED", v, NULL);
+                 g_fwapps[i].enabled ? L"Inbound allowed" : L"Inbound off", v, NULL);
     }
 
     nports = fw_list_ports(&ports);
@@ -512,7 +518,7 @@ static void page_fw(void)
 
     set_buttons(st.enabled == 1 ? L"Turn &off" : L"Turn &on",
                 st.block_all ? L"Allow e&xceptions" : L"Block &all",
-                L"&Block program...", L"&Remove rule", L"&Harden ports");
+                L"&Disable inbound...", L"&Remove rule", L"Remove risky &ports");
     set_status(L"Firewall: %s | %d program rule(s), %d open port(s)",
                st.enabled == 1 ? L"ON" : L"OFF", g_fwappn, nports);
 }
@@ -580,6 +586,10 @@ static void page_sys(void)
         for (i = 0; i < n; i++) { list_add(L"  excluded", L"", ex[i], NULL); free(ex[i]); }
         if (ex) free(ex);
     }
+    list_add(L"AutoRun", autorun_blocked() ? L"Blocked" : L"Windows default",
+             L"Inserted drives and discs can't start programs on their own", NULL);
+    list_add(L"Device guard", dev_enabled() ? L"Enabled" : L"Disabled",
+             L"Scans USB drives, memory cards, CDs and DVDs the moment they are inserted", NULL);
     list_add(L"Archive bomb guard", g_arcguard ? L"Enabled" : L"Disabled",
              L"Reads the zip manifest only - ratio, recursion, entry floods and ../ escapes", NULL);
     list_add(L"Repair sources", L"dllcache + i386",
@@ -838,6 +848,8 @@ static void stop_scan(void)
 
 static void do_reload_defs(void);
 
+static BOOL swap_defs(const wchar_t *path, BOOL quiet);
+
 static void do_load_defs(void)
 {
     OPENFILENAMEW ofn;
@@ -854,18 +866,37 @@ static void do_load_defs(void)
 
     if (!GetOpenFileNameW(&ofn)) return;
 
-    sigdb_free(&g_db);
-    if (sigdb_load(&g_db, file)) {
+    /* Validate the picked file before touching the live definitions. Names
+     * and full hashes are read from disk on demand, so the database must live
+     * at its permanent path: copy it into defs\ first, then load that copy. */
+    {
+        SIGDB probe;
+        if (!sigdb_load(&probe, file)) {
+            MessageBoxW(g_main, L"That file is damaged or not a CarrotAV definition "
+                        L"database. Your current definitions were kept.",
+                        AV_NAME, MB_ICONWARNING);
+            return;
+        }
+        sigdb_free(&probe);
+    }
+    {
         wchar_t dest[MAX_PATH];
         app_dir(dest, MAX_PATH);
         lstrcatW(dest, L"\\defs");
         CreateDirectoryW(dest, NULL);
         lstrcatW(dest, L"\\carrot.cdb");
-        if (lstrcmpiW(dest, file) != 0) CopyFileW(file, dest, FALSE);
+        if (g_job.running || dev_busy()) {
+            MessageBoxW(g_main, L"Finish or stop the running scan first.", AV_NAME, MB_ICONINFORMATION);
+            return;
+        }
+        if (lstrcmpiW(dest, file) != 0) {
+            BOOL shield = rt_active();
+            if (shield) rt_stop();            /* nothing may read carrot.cdb mid-copy */
+            CopyFileW(file, dest, FALSE);
+            if (shield) rt_start(g_main, &g_db);
+        }
+        if (!swap_defs(dest, FALSE)) return;
         MessageBoxW(g_main, L"Definitions loaded.", AV_NAME, MB_ICONINFORMATION);
-    } else {
-        MessageBoxW(g_main, L"That file is not a valid CarrotAV database.",
-                    AV_NAME, MB_ICONERROR);
     }
     show_page(TAB_UPDATE);
 }
@@ -1009,13 +1040,42 @@ static void do_update_online(void)
     if (g_page == TAB_UPDATE) page_update();
 }
 
+/* Replace the live definition database safely.
+ *  - The new file is loaded and validated into a separate SIGDB first, so a
+ *    broken file can never replace working definitions.
+ *  - The shield's threads read g_db, so they are stopped (and joined) before
+ *    the old database is freed, then restarted on the new one. Freeing it
+ *    under them could crash or return garbage.
+ *  - A running scan also reads it, so a reload waits for the scan instead. */
+static BOOL swap_defs(const wchar_t *path, BOOL quiet)
+{
+    SIGDB nd;
+    BOOL shield;
+    if (g_job.running || dev_busy()) {
+        if (!quiet) MessageBoxW(g_main, L"Finish or stop the running scan first, "
+                                L"then reload the definitions.", AV_NAME, MB_ICONINFORMATION);
+        return FALSE;
+    }
+    if (!sigdb_load(&nd, path)) {
+        if (!quiet) MessageBoxW(g_main, L"That definition file is damaged or not a CarrotAV "
+                                L"database. Your current definitions were kept.",
+                                AV_NAME, MB_ICONWARNING);
+        return FALSE;
+    }
+    shield = rt_active();
+    if (shield) rt_stop();
+    sigdb_free(&g_db);
+    g_db = nd;                         /* take ownership of the new tables */
+    if (shield) rt_start(g_main, &g_db);
+    return TRUE;
+}
+
 static void do_reload_defs(void)
 {
     wchar_t p[MAX_PATH];
     app_dir(p, MAX_PATH);
     lstrcatW(p, L"\\defs\\carrot.cdb");
-    sigdb_free(&g_db);
-    sigdb_load(&g_db, p);
+    swap_defs(p, FALSE);
     if (g_page == TAB_UPDATE) page_update();
     set_status(L"%u signatures loaded.", sigdb_count(&g_db));
 }
@@ -1031,13 +1091,13 @@ static void do_block_app(void)
     ofn.lpstrFilter = L"Programs (*.exe)\0*.exe\0All files\0*.*\0";
     ofn.lpstrFile   = file;
     ofn.nMaxFile    = MAX_PATH;
-    ofn.lpstrTitle  = L"Block a program from the network";
+    ofn.lpstrTitle  = L"Turn off a program's inbound exception";
     ofn.Flags       = OFN_FILEMUSTEXIST;
 
     if (!GetOpenFileNameW(&ofn)) return;
 
     if (fw_block_app(file))
-        MessageBoxW(g_main, L"Program blocked in Windows Firewall.", AV_NAME, MB_ICONINFORMATION);
+        MessageBoxW(g_main, L"Done. This program no longer has an inbound exception, so the\nfirewall refuses connections coming in to it.\n\nNote: the Windows XP firewall can't stop a program connecting OUT.", AV_NAME, MB_ICONINFORMATION);
     else
         MessageBoxW(g_main, L"Could not add the firewall rule.\n"
                             L"Run CarrotAV as an administrator.", AV_NAME, MB_ICONERROR);
@@ -1260,14 +1320,16 @@ static void do_button(int idx)
         if (idx == 4) {
             int n;
             if (MessageBoxW(g_main,
-                    L"Close the legacy Windows ports that are most often attacked?\n\n"
+                    L"Remove the firewall's open-port exceptions for the legacy\n"
+                    L"Windows ports most often attacked?\n\n"
                     L"135, 137-139, 445, 593, 1025 and 5000 (TCP and UDP).\n\n"
-                    L"File and printer sharing will stop working on this machine.",
+                    L"This removes exceptions only - the services themselves keep\n"
+                    L"running. File and printer sharing will stop working.",
                     AV_NAME, MB_ICONWARNING | MB_YESNO) != IDYES) break;
             n = fw_harden();
             {
                 wchar_t m[160];
-                wsprintfW(m, L"Removed %d open-port rule(s).", n);
+                wsprintfW(m, L"Removed %d open-port exception(s).", n);
                 MessageBoxW(g_main, m, AV_NAME, MB_ICONINFORMATION);
             }
         }
@@ -1779,6 +1841,56 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                           on ? MF_CHECKED : MF_UNCHECKED);
             return 0;
         }
+        case IDM_SCAN_DEVICE: {
+            /* pick a floppy / CD / USB drive and scan it in the Device Guard window */
+            wchar_t letters[26], title[64];
+            int n = dev_list_drives(letters, 26), i;
+            HMENU pm;
+            POINT pt;
+            UINT cmd;
+            if (!n) {
+                MessageBoxW(hwnd, L"No floppy, CD/DVD or USB drives found.", AV_NAME, MB_ICONINFORMATION);
+                return 0;
+            }
+            pm = CreatePopupMenu();
+            for (i = 0; i < n; i++) {
+                wchar_t root[4] = { letters[i], L':', L'\\', 0 };
+                UINT t = GetDriveTypeW(root);
+                wsprintfW(title, L"%s (%c:)",
+                          t == DRIVE_CDROM ? L"CD/DVD Drive" :
+                          t == DRIVE_REMOVABLE ? ((letters[i] == L'A' || letters[i] == L'B')
+                                                  ? L"Floppy Disk" : L"Removable Disk") : L"USB Drive",
+                          letters[i]);
+                AppendMenuW(pm, MF_STRING, IDM_DEVPICK_BASE + (letters[i] - L'A'), title);
+            }
+            GetCursorPos(&pt);
+            SetForegroundWindow(hwnd);
+            cmd = TrackPopupMenu(pm, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
+            DestroyMenu(pm);
+            if (cmd >= IDM_DEVPICK_BASE && cmd < IDM_DEVPICK_BASE + 26)
+                dev_scan_now((wchar_t)(L'A' + (cmd - IDM_DEVPICK_BASE)));
+            return 0;
+        }
+        case IDM_OPT_NOAUTORUN:
+            if (autorun_blocked() &&
+                MessageBoxW(hwnd, L"Turn AutoRun back on?\n\nAutoRun is how most USB worms spread on Windows XP: "
+                            L"a drive can start a program the moment it's plugged in, before any scan. "
+                            L"Your original Windows setting will be restored.",
+                            AV_NAME, MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES)
+                return 0;
+            autorun_set_blocked(!autorun_blocked());
+            CheckMenuItem(GetMenu(hwnd), IDM_OPT_NOAUTORUN,
+                          autorun_blocked() ? MF_CHECKED : MF_UNCHECKED);
+            set_status(autorun_blocked() ? L"AutoRun blocked: inserted drives and discs can't start programs."
+                                         : L"AutoRun restored to your original Windows setting.");
+            return 0;
+        case IDM_OPT_DEVGUARD:
+            dev_set_enabled(!dev_enabled());
+            CheckMenuItem(GetMenu(hwnd), IDM_OPT_DEVGUARD,
+                          dev_enabled() ? MF_CHECKED : MF_UNCHECKED);
+            set_status(dev_enabled() ? L"Device guard on: drives and discs are scanned when inserted."
+                                     : L"Device guard off.");
+            return 0;
         case IDM_OPT_ARCGUARD: {
             g_arcguard = !g_arcguard;
             CheckMenuItem(GetMenu(hwnd), IDM_OPT_ARCGUARD,
@@ -1842,6 +1954,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             return 0;
         }
+        case IDM_HELP_REPORT:
+            report_open(hwnd);
+            return 0;
         case IDM_ABOUT:
             MessageBoxW(hwnd,
                 AV_NAME L" " AV_VERSION L"\n"
@@ -1887,6 +2002,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_TIMER:
         if (wp == 1 && g_page == TAB_MON && rt_active()) page_mon();
         if (wp == 1) fw2k_tick();
+        if (wp == 1) wsc_tick(rt_active(), &g_db);   /* keep XP Security Center in sync */
         if (wp == 2) {
             /* Drive the progress bar from the scan's own counters. While the
              * pre-count is still running we don't know the total yet, so show
@@ -1931,7 +2047,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                  d->kind == DET_DISPUTED ? L"Verified - ignored" :
                  d->kind == DET_MODIFIED ? L"Repairable" :
                  msg == WM_RT_HIT ? L"Quarantined" : L"Detected");
-        if (msg == WM_RT_HIT) {
+        if (msg == WM_RT_HIT && d->kind == DET_DISPUTED) {
+            set_status(L"Shield: a trusted file matched a signature - listed for review, not removed.");
+        } else if (msg == WM_RT_HIT) {
             tray_threat(name, d->path);
             set_status(L"Real-time shield quarantined a threat.");
         }
@@ -2048,7 +2166,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         DestroyWindow(hwnd);
         return 0;
 
+    case WM_DEVICECHANGE:
+        dev_on_devicechange(wp, lp);
+        return TRUE;
+
     case WM_DESTROY:
+        wsc_exit(&g_db);                  /* Security Center: shield is going away */
         fw2k_stop();
         tray_remove();
         KillTimer(hwnd, 1);
@@ -2087,6 +2210,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmdline, int show)
     if (!cmdline || (!StrStrIW(cmdline, L"/exitnow") &&
                      !StrStrIW(cmdline, L"/clearhosts") &&
                      !StrStrIW(cmdline, L"/fwrestore") &&
+                     !StrStrIW(cmdline, L"/wscremove") &&
+                     !StrStrIW(cmdline, L"/autorunrestore") &&
                      !StrStrIW(cmdline, L"/importhosts") &&
                      !StrStrIW(cmdline, L"/background") &&
                      !StrStrIW(cmdline, L"/quick") &&
@@ -2137,6 +2262,18 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmdline, int show)
     /* Uninstaller calls this so CarrotAV never leaves a machine filtered. */
     if (cmdline && StrStrIW(cmdline, L"/fwrestore")) {
         fw2k_restore_permit_all();
+        return 0;
+    }
+
+    /* Uninstaller: take CarrotAV out of XP's Security Center. */
+    /* Uninstaller: give the user back their original AutoRun settings. */
+    if (cmdline && StrStrIW(cmdline, L"/autorunrestore")) {
+        autorun_block_restore();
+        return 0;
+    }
+
+    if (cmdline && StrStrIW(cmdline, L"/wscremove")) {
+        wsc_remove();
         return 0;
     }
 
@@ -2196,6 +2333,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmdline, int show)
     CheckMenuItem(GetMenu(g_main), IDM_OPT_CLOSETRAY, MF_CHECKED);
     if (g_autostart_on())
         CheckMenuItem(GetMenu(g_main), IDM_OPT_AUTORUN, MF_CHECKED);
+    dev_init(g_main, &g_db);
+    autorun_init();
+    if (autorun_blocked())
+        CheckMenuItem(GetMenu(g_main), IDM_OPT_NOAUTORUN, MF_CHECKED);
+    if (dev_enabled())
+        CheckMenuItem(GetMenu(g_main), IDM_OPT_DEVGUARD, MF_CHECKED);
 
     theme_load();
     theme_apply();
@@ -2225,6 +2368,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmdline, int show)
 
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
         if (accel && TranslateAcceleratorW(g_main, accel, &msg)) continue;
+        if (report_dialog_message(&msg)) continue;
         if (IsDialogMessageW(g_main, &msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);

@@ -24,7 +24,7 @@
 #include <string.h>
 
 #define AV_NAME     L"CarrotAV"
-#define AV_VERSION  L"2.0.1"
+#define AV_VERSION  L"2.1"
 #define MAX_PAT     256      /* max signature pattern length in bytes  */
 #define SCAN_CHUNK  (64*1024)
 
@@ -114,7 +114,8 @@ enum {
     SCAN_MEMORY,      /* running process images                    */
     SCAN_BOOT,        /* autorun/registry startup entries          */
     SCAN_VERIFY,      /* compare system files against the baseline  */
-    SCAN_BASELINE     /* build the baseline snapshot               */
+    SCAN_BASELINE,    /* build the baseline snapshot               */
+    SCAN_DEVICE       /* Device Guard: drive root first, then all of it */
 };
 
 enum { DET_SIG = 0, DET_HEUR, DET_PUA, DET_MODIFIED, DET_DISPUTED };
@@ -159,12 +160,41 @@ BOOL  hash_file_md5(const wchar_t *path, unsigned char out[16], unsigned int *si
 BOOL  eng_hash_file(const wchar_t *path, unsigned char md5[16], unsigned char sha[32],
                     BOOL want_sha, unsigned int *size);
 const char *eng_match_sections(SIGDB *db, const wchar_t *path);
+const char *eng_match_buffer(SIGDB *db, const unsigned char *buf, unsigned int len);
+
+/* ---- scanning inside ZIP archives (zipscan.c) ---- */
+const char *zip_scan_members(SIGDB *db, const wchar_t *path, char *member, int cap);
 const char *eng_match_file(SIGDB *db, const wchar_t *path,
                            unsigned char md5[16], unsigned int *size, BOOL *read_ok);
 
 /* ---- signature trust (trust.c) ---- */
 enum { TRUST_NONE = 0, TRUST_SIGNED, TRUST_MICROSOFT };
 int   trust_file(const wchar_t *path, wchar_t *signer, int cch);
+/* ---- Report a Problem (report.c) ---- */
+void  report_open(HWND owner);
+BOOL  report_dialog_message(MSG *msg);
+
+/* ---- AutoRun blocking (autorun.c) ---- */
+void  autorun_init(void);
+BOOL  autorun_blocked(void);
+void  autorun_set_blocked(BOOL on);
+BOOL  autorun_block_restore(void);
+
+/* ---- Windows XP Security Center (wsc.c) ---- */
+void  wsc_tick(BOOL shield_on, const SIGDB *db);
+void  wsc_exit(const SIGDB *db);
+void  wsc_remove(void);
+
+/* ---- Device Guard (devguard.c) ---- */
+void  dev_init(HWND owner, SIGDB *db);
+void  dev_on_devicechange(WPARAM w, LPARAM l);
+BOOL  dev_enabled(void);
+void  dev_set_enabled(BOOL on);
+BOOL  dev_busy(void);
+void  dev_scan_now(wchar_t letter);
+int   dev_list_drives(wchar_t *letters, int cap);
+void  dev_drive_title(wchar_t letter, wchar_t *out, int cap);
+BOOL  fp_confirmed(const wchar_t *path, const unsigned char md5[16], wchar_t *signer, int cch);
 BOOL  known_good_hash(const unsigned char md5[16]);
 int   heur_check(const wchar_t *path, const unsigned char *head, DWORD headlen,
                  DWORD filesize, char *outname, int outsz);
@@ -244,6 +274,8 @@ typedef struct {
 void  quar_dir(wchar_t *out, int cch);
 BOOL  quar_add(const wchar_t *path, const char *threat);
 BOOL  path_excluded(const wchar_t *path);
+BOOL  path_is_ours(const wchar_t *path);
+BOOL  path_is_critical(const wchar_t *path);
 int   quar_list(QITEM **out);          /* returns count, free with LocalFree */
 BOOL  quar_restore(const QITEM *it);
 BOOL  quar_delete(const QITEM *it);

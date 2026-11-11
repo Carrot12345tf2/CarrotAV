@@ -158,3 +158,50 @@ const char *eng_match_file(SIGDB *db, const wchar_t *path,
     if (!hit && db->hdr2.nsect) hit = eng_match_sections(db, path);
     return hit;
 }
+
+/* The same signature checks on bytes already in memory - used for files
+ * inside archives, which never touch the disk. Returns the malware name or
+ * NULL. Patterns are checked too, on small members, so the classic EICAR
+ * test file is caught inside a zip. */
+const char *eng_match_buffer(SIGDB *db, const unsigned char *buf, unsigned int len)
+{
+    HCRYPTHASH hh = 0;
+    unsigned char md5[16], sha[32];
+    DWORD hl = 16;
+    const char *hit = NULL;
+    SHA256_CTX sc;
+    PESECT s[96];
+    int n, i;
+
+    if (!db || !db->loaded || !eprov()) return NULL;
+
+    if (!CryptCreateHash(g_eprov, CALG_MD5, 0, 0, &hh)) return NULL;
+    if (CryptHashData(hh, buf, len, 0) && CryptGetHashParam(hh, HP_HASHVAL, md5, &hl, 0))
+        hit = sigdb_match_hash(db, md5, len);
+    CryptDestroyHash(hh);
+    if (hit) return hit;
+
+    if (db->hdr2.nsha) {
+        sha256_init(&sc);
+        sha256_update(&sc, buf, len);
+        sha256_final(&sc, sha);
+        if ((hit = sigdb_match_sha(db, sha, len)) != NULL) return hit;
+    }
+
+    if (db->hdr2.nsect) {
+        n = pe_sections(buf, len < PE_HEADSIZE ? len : PE_HEADSIZE, len, s, 96);
+        for (i = 0; i < n && !hit; i++) {
+            if (s[i].rsz > SECT_MAX || !sigdb_has_sect_size(db, s[i].rsz)) continue;
+            hh = 0; hl = 16;
+            if (!CryptCreateHash(g_eprov, CALG_MD5, 0, 0, &hh)) continue;
+            if (CryptHashData(hh, buf + s[i].raw, s[i].rsz, 0) &&
+                CryptGetHashParam(hh, HP_HASHVAL, md5, &hl, 0))
+                hit = sigdb_match_sect(db, md5, s[i].rsz);
+            CryptDestroyHash(hh);
+        }
+        if (hit) return hit;
+    }
+
+    if (len <= (1u << 20)) hit = sigdb_match_buf(db, buf, len);
+    return hit;
+}

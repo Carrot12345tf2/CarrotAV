@@ -229,47 +229,75 @@ BOOL grace_active(const wchar_t *path)
     return FALSE;
 }
 
-BOOL path_excluded(const wchar_t *path)
+/* Long, case-insensitive-comparable form of a path (8.3 names expanded). */
+static void long_form(const wchar_t *in, wchar_t *out, int cch)
 {
-    static const wchar_t *critical[] = {
-        L"\\ntldr", L"\\ntdetect.com", L"\\boot.ini", L"\\bootfont.bin",
-        L"\\ntoskrnl.exe", L"\\hal.dll", L"\\ntdll.dll", L"\\kernel32.dll",
-        L"\\winlogon.exe", L"\\csrss.exe", L"\\smss.exe", L"\\services.exe",
-        L"\\lsass.exe", L"\\userinit.exe", L"\\explorer.exe",
-        L"\\win.ini", L"\\system.ini", L"\\pagefile.sys", NULL
-    };
-    wchar_t self[MAX_PATH], selflong[MAX_PATH], pathlong[MAX_PATH];
+    if (!GetLongPathNameW(in, out, cch)) lstrcpynW(out, in, cch);
+}
+
+/* Is `path` inside `dir` (exact prefix on a path boundary)? */
+static BOOL under_dir(const wchar_t *path, const wchar_t *dir)
+{
+    int n = lstrlenW(dir);
+    while (n > 0 && dir[n-1] == L'\\') n--;
+    if (n == 0 || StrCmpNIW(path, dir, n) != 0) return FALSE;
+    return path[n] == 0 || path[n] == L'\\';
+}
+
+/* CarrotAV's own install tree (database, quarantine vault, tools). Exact
+ * prefix of the real install folder only. An earlier version also matched
+ * any path merely CONTAINING "\CarrotAV\" or a critical file name, so
+ * C:\Temp\CarrotAV\evil.exe or C:\Downloads\explorer.exe were never scanned. */
+BOOL path_is_ours(const wchar_t *path)
+{
+    wchar_t self[MAX_PATH], selflong[MAX_PATH], pathlong[MAX_PATH * 2];
+    app_dir(self, MAX_PATH);
+    if (!self[0]) return FALSE;
+    if (under_dir(path, self)) return TRUE;
+    long_form(self, selflong, MAX_PATH);
+    long_form(path, pathlong, MAX_PATH * 2);
+    return under_dir(pathlong, selflong);
+}
+
+/* Critical Windows files, by their exact real locations. These are still
+ * SCANNED like anything else - they just can never be quarantined, because
+ * removing one would stop Windows from booting. */
+BOOL path_is_critical(const wchar_t *path)
+{
+    static const wchar_t *in_root[] = { L"ntldr", L"ntdetect.com", L"boot.ini",
+                                        L"bootfont.bin", L"pagefile.sys", NULL };
+    static const wchar_t *in_win[]  = { L"explorer.exe", L"win.ini", L"system.ini", NULL };
+    static const wchar_t *in_sys[]  = { L"ntoskrnl.exe", L"hal.dll", L"ntdll.dll",
+        L"kernel32.dll", L"winlogon.exe", L"csrss.exe", L"smss.exe",
+        L"services.exe", L"lsass.exe", L"userinit.exe", NULL };
+    wchar_t win[MAX_PATH], sys[MAX_PATH], root[4], cand[MAX_PATH], p[MAX_PATH * 2];
     int i;
 
-    /* Our own install tree. Compare canonicalised paths: GetModuleFileName
-     * can hand back a short 8.3 form (C:\PROGRA~1\...) when launched from a
-     * shortcut, which never substring-matches the long form the scanner
-     * builds while walking the disk. That mismatch is why the database and
-     * README were being scanned and flagged. */
-    app_dir(self, MAX_PATH);
-    if (self[0]) {
-        if (StrStrIW(path, self)) return TRUE;
-        if (GetLongPathNameW(self, selflong, MAX_PATH) &&
-            GetLongPathNameW(path, pathlong, MAX_PATH)) {
-            if (StrStrIW(pathlong, selflong)) return TRUE;
-        }
-        /* last resort: match on the install folder's own name */
-        {
-            const wchar_t *leaf = PathFindFileNameW(self);
-            wchar_t frag[MAX_PATH];
-            if (leaf && *leaf) {
-                wsprintfW(frag, L"\\%s\\", leaf);
-                if (StrStrIW(path, frag)) return TRUE;
-            }
-        }
+    long_form(path, p, MAX_PATH * 2);
+    if (!GetWindowsDirectoryW(win, MAX_PATH) || !GetSystemDirectoryW(sys, MAX_PATH))
+        return FALSE;
+    lstrcpynW(root, win, 4);                          /* "C:\" */
+
+    for (i = 0; in_root[i]; i++) {
+        wsprintfW(cand, L"%s%s", root, in_root[i]);
+        if (!lstrcmpiW(p, cand) || !lstrcmpiW(path, cand)) return TRUE;
     }
-
-    for (i = 0; critical[i]; i++)
-        if (StrStrIW(path, critical[i])) return TRUE;
-
-    if (excl_match(path)) return TRUE;
-
+    for (i = 0; in_win[i]; i++) {
+        wsprintfW(cand, L"%s\\%s", win, in_win[i]);
+        if (!lstrcmpiW(p, cand) || !lstrcmpiW(path, cand)) return TRUE;
+    }
+    for (i = 0; in_sys[i]; i++) {
+        wsprintfW(cand, L"%s\\%s", sys, in_sys[i]);
+        if (!lstrcmpiW(p, cand) || !lstrcmpiW(path, cand)) return TRUE;
+    }
     return FALSE;
+}
+
+/* Skip scanning: CarrotAV's own files and the user's exclusions. Critical
+ * Windows files are deliberately NOT here - they get scanned. */
+BOOL path_excluded(const wchar_t *path)
+{
+    return path_is_ours(path) || excl_match(path);
 }
 
 BOOL quar_add(const wchar_t *path, const char *threat)
@@ -285,7 +313,7 @@ BOOL quar_add(const wchar_t *path, const char *threat)
     DWORD srcsize = 0, written = 0;
     BOOL copy_ok = TRUE, deleted;
 
-    if (path_excluded(path)) {
+    if (path_is_critical(path) || path_is_ours(path)) {
         log_line(L"PROTECTED  refused to quarantine %s [%S]", path, threat);
         return FALSE;
     }

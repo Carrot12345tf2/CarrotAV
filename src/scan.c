@@ -96,6 +96,99 @@ static BOOL icontains(const wchar_t *hay, const wchar_t *needle)
     return StrStrIW(hay, needle) != NULL;
 }
 
+/* Pull the program path out of an autorun command value: strip quotes and
+ * arguments ("x.exe" /s -> x.exe, x.exe /s -> x.exe). */
+static void autorun_target(const char *v, char *out, int cap)
+{
+    int n = 0;
+    while (*v == ' ' || *v == '\t') v++;
+    if (*v == '"') {
+        v++;
+        while (*v && *v != '"' && n < cap - 1) out[n++] = *v++;
+    } else {
+        while (*v && *v != ' ' && *v != '\t' && *v != ',' && n < cap - 1) out[n++] = *v++;
+    }
+    out[n] = 0;
+}
+
+/* Worm-style autorun.inf. Flagged when a program it launches:
+ *  - is hidden or system (the worm hides its copy so you never see it),
+ *  - sits in RECYCLER / RECYCLED / $Recycle.Bin / System Volume Information,
+ *  - has a disguise double extension (photo.jpg.exe),
+ *  - or the autorun.inf itself is hidden+system AND launches something.
+ * open=setup.exe next to a normal, visible setup.exe is left alone. */
+static BOOL autorun_suspicious(const wchar_t *path, const char *text, DWORD len)
+{
+    wchar_t dir[MAX_PATH*2];
+    char line[512];
+    const char *p = text, *end = text + len;
+    BOOL launches = FALSE, bad = FALSE;
+    DWORD self = GetFileAttributesW(path);
+
+    lstrcpynW(dir, path, MAX_PATH*2);
+    PathRemoveFileSpecW(dir);
+
+    while (p < end && !bad) {
+        int n = 0;
+        const char *eq, *key;
+        char tgt[MAX_PATH];
+        while (p < end && *p != '\r' && *p != '\n' && n < (int)sizeof(line) - 1) line[n++] = *p++;
+        line[n] = 0;
+        while (p < end && (*p == '\r' || *p == '\n')) p++;
+
+        key = line;
+        while (*key == ' ' || *key == '\t') key++;
+        eq = strchr(key, '=');
+        if (!eq) continue;
+        /* keys that launch something: open, shellexecute, shell\<verb>\command */
+        if (!(_strnicmp(key, "open", 4) == 0 && (key[4] == '=' || key[4] == ' ')) &&
+            !(_strnicmp(key, "shellexecute", 12) == 0) &&
+            !(_strnicmp(key, "shell\\", 6) == 0 && StrStrIA(key, "\\command") &&
+              StrStrIA(key, "\\command") < eq))
+            continue;
+
+        autorun_target(eq + 1, tgt, sizeof tgt);
+        if (!tgt[0]) continue;
+        launches = TRUE;
+
+        {
+            wchar_t wt[MAX_PATH], full[MAX_PATH*2];
+            const wchar_t *dot1, *dot2;
+            DWORD a;
+            MultiByteToWideChar(CP_ACP, 0, tgt, -1, wt, MAX_PATH);
+            if (wt[0] && wt[1] == L':') lstrcpynW(full, wt, MAX_PATH*2);       /* absolute */
+            else wsprintfW(full, L"%s\\%s", dir, wt[0] == L'\\' ? wt + 1 : wt);
+
+            if (StrStrIW(full, L"\\RECYCLER\\") || StrStrIW(full, L"\\RECYCLED\\") ||
+                StrStrIW(full, L"\\$Recycle.Bin\\") || StrStrIW(full, L"\\System Volume Information\\"))
+                bad = TRUE;
+
+            /* name.doc.exe style disguise */
+            dot2 = wcsrchr(full, L'.');
+            if (dot2) {
+                for (dot1 = dot2 - 1; dot1 > full && *dot1 != L'.' && *dot1 != L'\\'; dot1--) ;
+                if (*dot1 == L'.') {
+                    static const wchar_t *decoy[] = { L".jpg", L".jpeg", L".gif", L".png", L".bmp",
+                        L".doc", L".docx", L".xls", L".pdf", L".txt", L".mp3", L".avi", L".wmv", NULL };
+                    wchar_t inner[8];
+                    int k;
+                    lstrcpynW(inner, dot1, (int)(dot2 - dot1) + 1 < 8 ? (int)(dot2 - dot1) + 1 : 8);
+                    for (k = 0; decoy[k]; k++) if (!lstrcmpiW(inner, decoy[k])) bad = TRUE;
+                }
+            }
+
+            a = GetFileAttributesW(full);
+            if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY) &&
+                (a & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)))
+                bad = TRUE;
+        }
+    }
+    if (!bad && launches && self != INVALID_FILE_ATTRIBUTES &&
+        (self & FILE_ATTRIBUTE_HIDDEN) && (self & FILE_ATTRIBUTE_SYSTEM))
+        bad = TRUE;
+    return bad;
+}
+
 int heur_check(const wchar_t *path, const unsigned char *head, DWORD headlen,
                DWORD filesize, char *outname, int outsz)
 {
@@ -180,9 +273,11 @@ int heur_check(const wchar_t *path, const unsigned char *head, DWORD headlen,
         }
     }
 
-    /* autorun.inf on removable media is a classic worm vector */
+    /* autorun.inf: only flag what worms actually do. Plenty of real ones are
+     * harmless - an icon and a label, or open=setup.exe on an installer
+     * drive - so "has an open= line" is not enough on its own. */
     if (!lstrcmpiW(base, L"autorun.inf") && headlen > 8) {
-        if (StrStrIA((const char*)head, "open=") || StrStrIA((const char*)head, "shellexecute=")) {
+        if (autorun_suspicious(path, (const char*)head, headlen)) {
             lstrcpynA(outname, "Heur.AutorunInf", outsz);
             return DET_PUA;
         }
@@ -303,6 +398,16 @@ static BOOL scan_one(SCANJOB *j, const wchar_t *path, DWORD filesize)
             post_hit(j, path, ai.name, v == ARC_BOMB ? DET_HEUR : DET_PUA);
             return TRUE;
         }
+        /* not a bomb - now look inside it for known malware */
+        {
+            char member[128], label[128 + 140];
+            const char *zh = zip_scan_members(j->db, path, member, sizeof member);
+            if (zh) {
+                wsprintfA(label, "%.100s (inside %.100s)", zh, member);
+                post_hit(j, path, label, DET_SIG);
+                return TRUE;
+            }
+        }
     }
 
     /* Engine 2.0: whole-file MD5 and SHA-256 in one read, then PE section
@@ -329,6 +434,14 @@ static BOOL scan_one(SCANJOB *j, const wchar_t *path, DWORD filesize)
      * and never quarantine it automatically. */
     if (hit) {
         int kind = verified ? DET_DISPUTED : DET_SIG;
+        {
+            wchar_t who[128];
+            if (fp_confirmed(path, md5, who, 128)) {
+                log_line(L"TRUST  %s matched %S but is Windows' protected copy signed by %s - false positive, ignored",
+                         path, hit, who);
+                return FALSE;
+            }
+        }
         /* A signature hit on a file Microsoft genuinely signed (or listed in
          * a Windows catalog) is far more likely a bad signature than real
          * malware - the msinfo32 case. Show it, never quarantine it. Files
@@ -381,7 +494,7 @@ static BOOL scan_one(SCANJOB *j, const wchar_t *path, DWORD filesize)
     }
 
     /* deep mode: full-file pattern sweep with overlap between chunks */
-    if (j->mode == SCAN_DEEP && j->db->hdr.npat) {
+    if ((j->mode == SCAN_DEEP || j->mode == SCAN_DEVICE) && j->db->hdr.npat) {
         unsigned char *buf = (unsigned char*)malloc(SCAN_CHUNK + MAX_PAT);
         DWORD carry = 0, total, keep;
         if (!buf) return FALSE;
@@ -429,7 +542,7 @@ static BOOL want_file(SCANJOB *j, const wchar_t *name, DWORD size)
         InterlockedIncrement(&j->skipped);
         return FALSE;
     }
-    if (j->mode == SCAN_DEEP || j->mode == SCAN_CUSTOM) return TRUE;
+    if (j->mode == SCAN_DEEP || j->mode == SCAN_CUSTOM || j->mode == SCAN_DEVICE) return TRUE;
     if (!e) return FALSE;
     for (i = 0; hot[i]; i++) if (!lstrcmpiW(e, hot[i])) return TRUE;
     return FALSE;
@@ -474,6 +587,42 @@ static void walk(SCANJOB *j, const wchar_t *dir, int depth)
     } while (FindNextFileW(h, &fd));
 
     FindClose(h);
+}
+
+/* USB guard: two passes over the drive.
+ * Pass 1 is the quick check - only the files sitting in the drive's top
+ * folder. That is where USB worms live (autorun.inf plus the program it
+ * launches, or a fake "folder" .exe), so they are caught in the first few
+ * seconds. Pass 2 then goes through every subfolder, so together the drive
+ * is covered completely and nothing is scanned twice. */
+static void walk_usb(SCANJOB *j)
+{
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    wchar_t pat[MAX_PATH*2], sub[MAX_PATH*2];
+    int pass;
+
+    for (pass = 0; pass < 2 && !j->cancel; pass++) {
+        wsprintfW(pat, L"%s\\*", j->root);
+        h = FindFirstFileW(pat, &fd);
+        if (h == INVALID_HANDLE_VALUE) { InterlockedIncrement(&j->skipped); return; }
+        do {
+            BOOL isdir;
+            if (j->cancel) break;
+            if (!lstrcmpW(fd.cFileName, L".") || !lstrcmpW(fd.cFileName, L"..")) continue;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+            isdir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            wsprintfW(sub, L"%s\\%s", j->root, fd.cFileName);
+            if (pass == 0 && !isdir) {
+                if (!want_file(j, fd.cFileName, fd.nFileSizeLow)) continue;
+                post_file(j, sub);
+                scan_one(j, sub, fd.nFileSizeLow);
+            } else if (pass == 1 && isdir) {
+                walk(j, sub, 1);
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
 }
 
 static void scan_memory(SCANJOB *j)
@@ -588,6 +737,7 @@ DWORD WINAPI scan_thread(LPVOID param)
         if (GetSystemDirectoryW(buf, MAX_PATH)) count_dir(j, buf, 0);
         break;
     case SCAN_CUSTOM:
+    case SCAN_DEVICE:
         if (j->root[0]) count_dir(j, j->root, 0);
         break;
     case SCAN_FULL:
@@ -656,6 +806,10 @@ DWORD WINAPI scan_thread(LPVOID param)
         }
         break;
     }
+
+    case SCAN_DEVICE:
+        walk_usb(j);
+        break;
 
     case SCAN_CUSTOM: {
         DWORD a = GetFileAttributesW(j->root);

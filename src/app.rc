@@ -13,6 +13,7 @@ BEGIN
         MENUITEM "&Full System Scan",          IDM_SCAN_FULL
         MENUITEM "&Deep Scan (patterns)",      IDM_SCAN_DEEP
         MENUITEM "Scan &Folder...",            IDM_SCAN_CUSTOM
+        MENUITEM "Scan a Disc or &Drive...",   IDM_SCAN_DEVICE
         MENUITEM SEPARATOR
         MENUITEM "Scan &Memory",               IDM_SCAN_MEMORY
         MENUITEM "Scan &Startup Entries",      IDM_SCAN_BOOT
@@ -34,8 +35,8 @@ BEGIN
         MENUITEM SEPARATOR
         MENUITEM "Firewall &On",               IDM_FW_ON
         MENUITEM "Firewall O&ff",              IDM_FW_OFF
-        MENUITEM "&Block a Program...",        IDM_FW_BLOCKAPP
-        MENUITEM "&Harden Legacy Ports",       IDM_FW_HARDEN
+        MENUITEM "&Disable Inbound Exception...", IDM_FW_BLOCKAPP
+        MENUITEM "Remove Risky &Port Exceptions", IDM_FW_HARDEN
         MENUITEM SEPARATOR
         MENUITEM "&Import Web Blocklist...",   IDM_WEB_IMPORT
         MENUITEM "&Clear Web Blocklist",       IDM_WEB_CLEAR
@@ -50,6 +51,8 @@ BEGIN
     BEGIN
         MENUITEM "Enable &Heuristics",         IDM_OPT_HEUR
         MENUITEM "Archive &Bomb Guard",        IDM_OPT_ARCGUARD
+        MENUITEM "&Device Guard (scan drives and discs when inserted)", IDM_OPT_DEVGUARD
+        MENUITEM "Block Auto&Run (recommended)", IDM_OPT_NOAUTORUN
         MENUITEM SEPARATOR
         MENUITEM "Balloon &Alerts",            IDM_OPT_BALLOON
         MENUITEM "&Minimize to Tray",          IDM_OPT_TRAY
@@ -69,14 +72,15 @@ BEGIN
     POPUP "&Help"
     BEGIN
         MENUITEM "Check &Definition Age",       IDM_CHECK_UPDATE
+        MENUITEM "&Report a Problem...",        IDM_HELP_REPORT
         MENUITEM SEPARATOR
         MENUITEM "&About CarrotAV",            IDM_ABOUT
     END
 END
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     2,0,1,0
-PRODUCTVERSION  2,0,1,0
+FILEVERSION     2,1,0,0
+PRODUCTVERSION  2,1,0,0
 FILEOS          VOS_NT_WINDOWS32
 FILETYPE        VFT_APP
 BEGIN
@@ -86,11 +90,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Carrot Software"
             VALUE "FileDescription",  "CarrotAV Antivirus Scanner"
-            VALUE "FileVersion",      "2.0.1.0"
+            VALUE "FileVersion",      "2.1.0.0"
             VALUE "InternalName",     "carrotav"
             VALUE "OriginalFilename", "carrotav.exe"
             VALUE "ProductName",      "CarrotAV"
-            VALUE "ProductVersion",   "2.0.1.0"
+            VALUE "ProductVersion",   "2.1.0.0"
             VALUE "LegalCopyright",   "Public domain"
         END
     END

@@ -82,6 +82,28 @@ static void rt_threat(const wchar_t *path, const char *name, const wchar_t *how)
     if (!PostMessageW(g_rt.notify, WM_RT_HIT, 0, (LPARAM)d)) LocalFree(d);
 }
 
+/* A known-malware signature matched a file we have reason to trust (it's in
+ * the baseline, it's Windows' own protected copy, or Microsoft signed it).
+ * That is usually a bad signature - but a baseline taken on an already
+ * infected machine would also look like this, so it is NEVER silently
+ * dropped. The user sees it; it just isn't quarantined automatically. */
+static void rt_disputed(const wchar_t *path, const char *name, const wchar_t *why)
+{
+    DETECTION *d;
+    wchar_t wname[160], what[200];
+    MultiByteToWideChar(CP_ACP, 0, name, -1, wname, 160);
+    wsprintfW(what, L"Disputed (%s): %s", why, wname);
+    log_line(L"DISPUTED  %s matched %S but %s - reported, not quarantined", path, name, why);
+    rt_event(RT_THREAT, what, path);
+    if (!g_rt.notify) return;
+    d = (DETECTION*)LocalAlloc(LPTR, sizeof(DETECTION));
+    if (!d) return;
+    lstrcpynW(d->path, path, MAX_PATH*2);
+    lstrcpynA(d->name, name, 128);
+    d->kind = DET_DISPUTED;
+    if (!PostMessageW(g_rt.notify, WM_RT_HIT, 0, (LPARAM)d)) LocalFree(d);
+}
+
 /* Scan one file the way the guards want it: hash first, heuristics second.
  * Returns the threat name or NULL. Caller supplies the name buffer. */
 static const char *rt_check(const wchar_t *path, char *hbuf, int hsz)
@@ -108,30 +130,40 @@ static const char *rt_check(const wchar_t *path, char *hbuf, int hsz)
             lstrcpynA(hbuf, ai.name, hsz);
             return hbuf;
         }
+        {
+            char member[128], label[128 + 140];
+            const char *zh = zip_scan_members(g_rt.db, path, member, sizeof member);
+            if (zh) {
+                wsprintfA(label, "%.100s (inside %.100s)", zh, member);
+                lstrcpynA(hbuf, label, hsz);
+                return hbuf;
+            }
+        }
     }
 
     {
         BOOL readok;
+        const wchar_t *why = NULL;
+        wchar_t who[128];
         hit = eng_match_file(g_rt.db, path, md5, &sz, &readok);
         if (readok) {
             if (known_good_hash(md5)) return NULL;   /* legit installer scaffolding */
-            /* verified = unchanged at this path; skip it rather than fight a
-             * bad signature over a file we know has not been touched */
-            if (base_check_path(path, md5) == BASE_CLEAN) return NULL;
-            if (wfp_trusted(path, md5)) return NULL;
+            if (base_check_path(path, md5) == BASE_CLEAN) why = L"file is in your baseline";
+            else if (wfp_trusted(path, md5))          why = L"file is Windows' own protected copy";
         }
-    }
-    if (hit) {
-        /* The shield acts on its own, so it must never quarantine a file
-         * Microsoft genuinely signed over what is almost certainly a bad
-         * signature. Anything else signed still gets caught. */
-        wchar_t who[128];
-        if (trust_file(path, who, 128) == TRUST_MICROSOFT) {
-            log_line(L"TRUST  shield left %s alone: matched %S but signed by %s",
-                     path, hit, who);
-            return NULL;
+        if (hit) {
+            if (fp_confirmed(path, md5, who, 128)) {
+                log_line(L"TRUST  shield: %s matched %S but is Windows' protected copy signed by %s - false positive, ignored",
+                         path, hit, who);
+                return NULL;
+            }
+            if (!why && trust_file(path, who, 128) == TRUST_MICROSOFT)
+                why = L"file is signed by Microsoft";
+            if (why) { rt_disputed(path, hit, why); return NULL; }
+            return hit;
         }
-        return hit;
+        /* verified files skip the heuristics (a guess never beats evidence) */
+        if (why) return NULL;
     }
 
     fh = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,

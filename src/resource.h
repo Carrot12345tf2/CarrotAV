@@ -34,6 +34,10 @@
 #define IDM_OPT_TRAY       40065
 #define IDM_OPT_CLOSETRAY  40066
 #define IDM_OPT_AUTORUN    40067
+#define IDM_OPT_DEVGUARD   40068
+#define IDM_OPT_NOAUTORUN  40069
+#define IDM_SCAN_DEVICE    40008
+#define IDM_DEVPICK_BASE   40200   /* +0..25 = drive A..Z */
 #define IDM_THEME_CLASSIC  40080
 #define IDM_THEME_AERO     40081
 #define IDM_THEME_GREEN    40082
@@ -41,6 +45,7 @@
 #define IDM_VIEW_LOG       40062
 #define IDM_ABOUT          40070
 #define IDM_CHECK_UPDATE   40071
+#define IDM_HELP_REPORT    40090
 
 /* controls */
 #define IDC_TAB            1000

@@ -190,3 +190,15 @@ int trust_file(const wchar_t *path, wchar_t *signer, int cch)
     if (StrStrIW(who, L"Microsoft")) return TRUST_MICROSOFT;
     return TRUST_SIGNED;
 }
+
+/* A signature hit is a confirmed false positive only when TWO independent
+ * checks agree: the bytes match Windows File Protection's pristine copy, AND
+ * Windows itself verifies a Microsoft signature (embedded or catalog). The
+ * baseline alone never counts - it may have been taken on an infected box.
+ * This is what clears msinfo32.exe in dllcache instead of re-flagging it on
+ * every scan. */
+BOOL fp_confirmed(const wchar_t *path, const unsigned char md5[16], wchar_t *signer, int cch)
+{
+    if (!wfp_trusted(path, md5)) return FALSE;
+    return trust_file(path, signer, cch) == TRUST_MICROSOFT;
+}

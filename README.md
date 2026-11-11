@@ -6,6 +6,10 @@ I created this anti-virus because I myself, have an old xp machine. I was tired 
 constantly looking for modern anti-viruses that would work on it to keep it safe.
 So, I decided to create my own.
 
+## What's New in 2.1
+
+Added Device Guard, drive scanning, AutoRun blocking, Security Center support, ZIP scanning, problem reporting, smarter autorun.inf detection, and more!
+
 ## Features
 
 - **Scanning** — There are 4 different modes of scanning, quick, full, deep, and custom.
@@ -31,9 +35,10 @@ also skip heuristics.
   path-bound, so a real infection still shows even on a baselined file, and
   modified system files can be repaired from Windows' own `dllcache`/`i386`.
   
-- **Firewall** — On XP, this program controls the built-in firewall through it's COM API, you can toggle
-  it, block programs, and list and close open ports. On Windows 2000, it uses the built-in
-  TCP/IP filtering to control which inbound ports are allowed.
+- **Firewall** — On XP, this program controls the built-in firewall through its COM API, you can toggle
+  it, turn off programs' inbound exceptions, and list and close open ports. XP's firewall only filters
+  incoming connections. On Windows 2000, it uses the built-in TCP/IP filtering to control which inbound
+  ports are allowed, and your own filtering settings are backed up and restored.
   
 - **Web shield** — This software also imports a hosts-format blocklist (ships with about 90k domains from
   StevenBlack and The Block List Project) inside a managed marker block, so your own entries are never touched.
@@ -49,6 +54,19 @@ also skip heuristics.
 - **Online definition updates** — `defupdate.exe` bundles its own TLS 1.2
   (mbedTLS) so it can download and compile definitions from the XP or 2000 machine
   itself, with no second computer and no Python.
+  
+- **Device Guard** — USB drives, memory cards, CDs and DVDs are scanned the moment they're inserted. Floppies
+  and any other drive can be scanned anytime from File → Scan a Disc or Drive.
+
+- **AutoRun blocking** — Stops Windows from running autorun.inf at all, the #1 way USB worms spread on XP. Your
+  original settings are backed up and put back if you turn it off or uninstall.
+
+- **Security Center support** — On XP, CarrotAV shows up in Security Center as your antivirus, so the red
+  "Your computer might be at risk" warning goes away. It honestly reports when the shield is off or definitions are old.
+
+- **ZIP scanning** — Known malware inside a .zip is caught before you ever extract it.
+
+- **Report a Problem** — Found a bug? Help → Report a Problem sends it straight to me from inside CarrotAV.
 
 ## Heads Up 
 

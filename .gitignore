@@ -17,3 +17,6 @@ update_check.txt
 Thumbs.db
 !updater/defupdate.exe
 !tools/defupdate.exe
+__pycache__/
+*.pyc
+defs/carrot.cdb.*

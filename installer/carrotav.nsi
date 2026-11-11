@@ -11,7 +11,7 @@ Var UPGRADING
 Var PREV_VER
 
 !define APPNAME    "CarrotAV"
-!define APPVER     "2.0.1"
+!define APPVER     "2.1"
 !define APPEXE     "carrotav.exe"
 !define REGUNINST  "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
 
@@ -30,7 +30,7 @@ SetCompressor /SOLID lzma
 BrandingText    "Carrot Software"
 XPStyle on
 
-VIProductVersion "1.9.0.0"
+VIProductVersion "2.0.1.0"
 VIAddVersionKey "ProductName"     "${APPNAME}"
 VIAddVersionKey "FileDescription" "${APPNAME} Setup"
 VIAddVersionKey "FileVersion"     "${APPVER}"
@@ -265,6 +265,15 @@ Section "Uninstall"
   ;     and survives reboots, so leaving it behind would filter a machine that
   ;     no longer has CarrotAV on it.
   nsExec::ExecToLog '"$INSTDIR\${APPEXE}" /fwrestore'
+  Pop $0
+
+  ; 2c. Take CarrotAV out of Windows XP's Security Center, so XP doesn't keep
+  ;     thinking a removed antivirus is protecting it.
+  nsExec::ExecToLog '"$INSTDIR\${APPEXE}" /wscremove'
+  Pop $0
+
+  ; 2d. Put back the user's original AutoRun settings.
+  nsExec::ExecToLog '"$INSTDIR\${APPEXE}" /autorunrestore'
   Pop $0
 
   ; 3. Program files

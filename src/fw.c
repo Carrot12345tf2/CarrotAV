@@ -214,7 +214,10 @@ BOOL fw_app_set(const wchar_t *path, const wchar_t *name, BOOL enabled)
 
     INetFwAuthorizedApplication_put_ProcessImageFileName(app, bpath);
     INetFwAuthorizedApplication_put_Name(app, bname);
-    INetFwAuthorizedApplication_put_Scope(app, NET_FW_SCOPE_ALL);
+    /* Allow rules default to the local network only, never the whole
+     * internet - Microsoft's own guidance for firewall exceptions. */
+    INetFwAuthorizedApplication_put_Scope(app,
+        enabled ? NET_FW_SCOPE_LOCAL_SUBNET : NET_FW_SCOPE_ALL);
     INetFwAuthorizedApplication_put_Enabled(app,
         enabled ? VARIANT_TRUE : VARIANT_FALSE);
 

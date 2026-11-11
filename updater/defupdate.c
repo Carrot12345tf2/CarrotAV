@@ -71,7 +71,7 @@ static int https_download(const char *host, const char *port,
     mbedtls_net_context net;
     mbedtls_ssl_context ssl;
     mbedtls_ssl_config  conf;
-    int ret, in_body = 0;
+    int ret;
     char req[512];
     unsigned char buf[BUF_SZ];
     FILE *out = NULL;
@@ -141,38 +141,69 @@ static int https_download(const char *host, const char *port,
     if (!out) { printf("  cannot write %s\n", outfile); goto cleanup_fail; }
 
     printf("  downloading %s ", path);
+    {
+        /* Headers can arrive split across several TLS reads, so collect them
+         * into their own NUL-terminated buffer until the blank line, and only
+         * then parse. Anything after the blank line is the start of the body. */
+        static char hdr[16384];
+        int hlen = 0;
+        char *end = NULL;
+        while (!end) {
+            ret = mbedtls_ssl_read(&ssl, (unsigned char*)hdr + hlen, sizeof(hdr) - 1 - hlen);
+            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+            if (ret <= 0) { printf("\n  connection closed before headers finished\n"); goto cleanup_fail; }
+            hlen += ret;
+            hdr[hlen] = 0;
+            end = strstr(hdr, "\r\n\r\n");
+            if (!end && hlen >= (int)sizeof(hdr) - 1) {
+                printf("\n  server headers too large\n"); goto cleanup_fail;
+            }
+        }
+        {
+            /* status line must be "HTTP/1.x 200 ..." */
+            char *eol = strstr(hdr, "\r\n"), *h;
+            if (strncmp(hdr, "HTTP/1.", 7) != 0 || strncmp(hdr + 8, " 200", 4) != 0) {
+                if (eol) *eol = 0;
+                printf("\n  server said: %s\n", hdr);
+                goto cleanup_fail;
+            }
+            /* case-insensitive header scan, only inside the header block */
+            *end = 0;
+            for (h = hdr; h && *h; h = strstr(h, "\r\n") ? strstr(h, "\r\n") + 2 : NULL) {
+                if (!_strnicmp(h, "Content-Length:", 15)) content_len = _atoi64(h + 15);
+                if (!_strnicmp(h, "Transfer-Encoding:", 18) && strstr(h, "chunked") &&
+                    strstr(h, "chunked") < (strstr(h, "\r\n") ? strstr(h, "\r\n") : h + strlen(h))) {
+                    printf("\n  server used chunked encoding, which this updater doesn't support\n");
+                    goto cleanup_fail;
+                }
+            }
+            {
+                int body = hlen - (int)((end + 4) - hdr);
+                if (body > 0) {
+                    if (fwrite(end + 4, 1, body, out) != (size_t)body) {
+                        printf("\n  disk write failed\n"); goto cleanup_fail;
+                    }
+                    total += body;
+                }
+            }
+        }
+    }
     for (;;) {
         ret = mbedtls_ssl_read(&ssl, buf, sizeof(buf));
         if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
-        if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) break;
+        if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || ret == 0) break;
         if (ret < 0) { printf("\n  read error (-0x%04x)\n", -ret); goto cleanup_fail; }
-        if (ret == 0) break;
-
-        if (!in_body) {
-            /* find the end of headers within this chunk */
-            unsigned char *p = (unsigned char*)strstr((char*)buf, "\r\n\r\n");
-            char *cl = strstr((char*)buf, "Content-Length:");
-            if (cl) content_len = atoll(cl + 15);
-            if (strstr((char*)buf, " 200") == NULL &&
-                strstr((char*)buf, "200 OK") == NULL) {
-                /* not a 200 - dump status line */
-                char *eol = strstr((char*)buf, "\r\n");
-                if (eol) *eol = 0;
-                printf("\n  server said: %s\n", buf);
-                goto cleanup_fail;
-            }
-            if (p) {
-                int hlen = (int)(p - buf) + 4;
-                int bodylen = ret - hlen;
-                if (bodylen > 0) fwrite(p + 4, 1, bodylen, out);
-                total += bodylen;
-                in_body = 1;
-            }
-        } else {
-            fwrite(buf, 1, ret, out);
-            total += ret;
-            if ((total % (1024*1024)) < BUF_SZ) { printf("."); fflush(stdout); }
-        }
+        if (fwrite(buf, 1, ret, out) != (size_t)ret) { printf("\n  disk write failed\n"); goto cleanup_fail; }
+        total += ret;
+        if ((total % (1024*1024)) < BUF_SZ) { printf("."); fflush(stdout); }
+        if (content_len >= 0 && total >= content_len) break;   /* got it all */
+    }
+    /* A dropped connection must never be mistaken for a finished download:
+     * a truncated database would compile into partial definitions. */
+    if (content_len < 0 || total != content_len) {
+        printf("\n  incomplete download (%.1f of %.1f MB) - try again\n",
+               total / 1048576.0, content_len < 0 ? 0.0 : content_len / 1048576.0);
+        goto cleanup_fail;
     }
     fclose(out); out = NULL;
     printf(" %.1f MB\n", total / 1048576.0);
@@ -181,7 +212,7 @@ static int https_download(const char *host, const char *port,
     mbedtls_net_free(&net);
     mbedtls_ssl_free(&ssl);
     mbedtls_ssl_config_free(&conf);
-    return (total > 0) ? 0 : -1;
+    return 0;
 
 cleanup_fail:
     if (out) fclose(out);
@@ -636,7 +667,161 @@ static void clean_update_dir(const char *updir)
     FindClose(h);
 }
 
+/* Same layout math as CarrotAV's loader: header sane, and the file really
+ * contains every table the header claims. Catches truncated or garbled output
+ * before it can replace working definitions. */
+static int cdb_looks_valid(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    unsigned int h[7], h2[8] = {0};
+    long long need, have;
+    if (!f) return 0;
+    if (fread(h, 4, 7, f) != 7 || memcmp(h, "CAVD", 4) != 0 || (h[1] != 1 && h[1] != 2)) {
+        fclose(f); return 0;
+    }
+    if (h[1] == 2 && fread(h2, 4, 8, f) != 8) { fclose(f); return 0; }
+    fseek(f, 0, SEEK_END);
+    have = ftell(f);
+    fclose(f);
+    need = 28 + (h[1] == 2 ? 32 : 0)
+         + (long long)h[2] * 24            /* MD5 records     */
+         + (long long)h2[0] * 40           /* SHA-256 records */
+         + (long long)h2[1] * 24           /* section records */
+         + (long long)h[3] * 10            /* pattern records */
+         + h[4] + h[5];                    /* pattern data + names */
+    if (need != have) return 0;
+    if ((long long)h[2] + h2[0] + h2[1] < 100000) return 0;   /* suspiciously few */
+    return 1;
+}
+
+/* ------------------------------------------------------- bug reports
+ * carrotav.exe writes the report as a JSON body to a file and runs
+ *   defupdate.exe --report=<file>
+ * with no console window. We POST it to Web3Forms over our own TLS (XP's
+ * own HTTPS can't reach it) and write "ok" or "error <reason>" to
+ * report_result.txt next to us for the GUI to read. Web3Forms emails the
+ * report to the CarrotAV reports inbox; its access key is public by design
+ * and can only deliver to that inbox. */
+/* Progress for the GUI: each stage is written (and flushed) to
+ * report_result.txt as we reach it, so if we are killed for taking too long
+ * the GUI can still tell where we got stuck. The final line is the answer. */
+static FILE *g_stage;
+static void stage(const char *s)
+{
+    if (g_stage) { fprintf(g_stage, "stage %s\n", s); fflush(g_stage); }
+}
+
+static int https_post_json(const char *host, const char *path, const char *body,
+                           char *reply, int replycap)
+{
+    mbedtls_net_context net;
+    mbedtls_ssl_context ssl;
+    mbedtls_ssl_config  conf;
+    char hdr[512];
+    int ret, n = 0, status = -1;
+    size_t blen = strlen(body), off;
+
+    mbedtls_net_init(&net); mbedtls_ssl_init(&ssl); mbedtls_ssl_config_init(&conf);
+    reply[0] = 0;
+    stage("connecting");
+    if (mbedtls_net_connect(&net, host, "443", MBEDTLS_NET_PROTO_TCP) != 0) { status = -2; goto out; }
+    stage("handshake");
+    if (mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
+                                    MBEDTLS_SSL_PRESET_DEFAULT) != 0) goto out;
+    mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+    mbedtls_ssl_conf_ca_chain(&conf, &g_cacert, NULL);
+    mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &g_drbg);
+    mbedtls_ssl_conf_min_version(&conf, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3);
+    if (mbedtls_ssl_setup(&ssl, &conf) != 0 || mbedtls_ssl_set_hostname(&ssl, host) != 0) goto out;
+    mbedtls_ssl_set_bio(&ssl, &net, mbedtls_net_send, mbedtls_net_recv, NULL);
+    while ((ret = mbedtls_ssl_handshake(&ssl)) != 0)
+        if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) { status = -3; goto out; }
+    if (mbedtls_ssl_get_verify_result(&ssl) != 0) { status = -3; goto out; }
+    stage("sending");
+
+    wsprintfA(hdr, "POST %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: CarrotAV-report/1.0\r\n"
+                   "Content-Type: application/json\r\nAccept: application/json\r\n"
+                   "Content-Length: %u\r\nConnection: close\r\n\r\n", path, host, (unsigned)blen);
+    for (off = 0; off < strlen(hdr); ) {
+        ret = mbedtls_ssl_write(&ssl, (const unsigned char*)hdr + off, strlen(hdr) - off);
+        if (ret <= 0) goto out;
+        off += ret;
+    }
+    for (off = 0; off < blen; ) {
+        ret = mbedtls_ssl_write(&ssl, (const unsigned char*)body + off, blen - off);
+        if (ret <= 0) goto out;
+        off += ret;
+    }
+    stage("waiting for reply");
+    for (;;) {
+        if (n >= replycap - 1) break;
+        ret = mbedtls_ssl_read(&ssl, (unsigned char*)reply + n, replycap - 1 - n);
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+        if (ret <= 0) break;
+        n += ret;
+    }
+    reply[n] = 0;
+    if (!strncmp(reply, "HTTP/1.", 7)) status = atoi(reply + 9);
+out:
+    mbedtls_ssl_close_notify(&ssl);
+    mbedtls_net_free(&net); mbedtls_ssl_free(&ssl); mbedtls_ssl_config_free(&conf);
+    return status;
+}
+
+static int do_report(const char *bodyfile, const char *exedir)
+{
+    char respath[MAX_PATH], *body = NULL, reply[8192];
+    const char *host = "api.web3forms.com", *path = "/submit";
+    FILE *f = fopen(bodyfile, "rb"), *rf;
+    long len;
+    int st;
+
+    wsprintfA(respath, "%s\\report_result.txt", exedir);
+    rf = fopen(respath, "w");
+    g_stage = rf;
+    stage("started");
+    if (!f) { if (rf) { fprintf(rf, "error no report file\n"); fclose(rf); } return 1; }
+    fseek(f, 0, SEEK_END); len = ftell(f); fseek(f, 0, SEEK_SET);
+    if (len <= 0 || len > 64 * 1024) { fclose(f); if (rf) { fprintf(rf, "error bad report size\n"); fclose(rf); } return 1; }
+    body = (char*)malloc(len + 1);
+    if (!body || fread(body, 1, len, f) != (size_t)len) { fclose(f); free(body); if (rf) { fprintf(rf, "error read\n"); fclose(rf); } return 1; }
+    body[len] = 0;
+    fclose(f);
+
+    /* test hook: CARROTAV_REPORT_HOST=<host> sends to a test server instead */
+    {
+        static char th[256];
+        DWORD k = GetEnvironmentVariableA("CARROTAV_REPORT_HOST", th, sizeof th);
+        if (k > 0 && k < sizeof th) host = th;
+    }
+
+    st = https_post_json(host, path, body, reply, sizeof reply);
+    g_stage = NULL;
+    free(body);
+    if (!rf) return st == 200 ? 0 : 1;
+    if (st == 200 && strstr(reply, "\"success\":true")) fprintf(rf, "ok\n");
+    else if (st == 200) {
+        /* 200 but not success: keep a short piece of the reply for the log */
+        char *b = strstr(reply, "\r\n\r\n"), snip[120];
+        lstrcpynA(snip, b ? b + 4 : reply, sizeof snip);
+        { char *q; for (q = snip; *q; q++) if (*q == '\r' || *q == '\n') *q = ' '; }
+        fprintf(rf, "error reply %s\n", snip);
+    }
+    else if (st == 429) fprintf(rf, "error busy\n");
+    else if (st == -2) fprintf(rf, "error noconnect\n");
+    else if (st == -3) fprintf(rf, "error tls\n");
+    else {
+        char *b = strstr(reply, "\r\n\r\n"), snip[120] = "";
+        if (b) lstrcpynA(snip, b + 4, sizeof snip);
+        { char *q; for (q = snip; *q; q++) if (*q == '\r' || *q == '\n') *q = ' '; }
+        fprintf(rf, "error http %d %s\n", st, snip);
+    }
+    fclose(rf);
+    return st == 200 ? 0 : 1;
+}
+
 int main(int argc, char **argv)
+
 {
     char exedir[MAX_PATH], ca[MAX_PATH], defsdir[MAX_PATH];
     char cvdpaths[2][MAX_PATH];
@@ -644,6 +829,25 @@ int main(int argc, char **argv)
     char *p;
     int i, got = 0;
     char newtag[32] = "";
+
+    GetModuleFileNameA(NULL, exedir, MAX_PATH);
+    p = strrchr(exedir, '\\'); if (p) *p = 0;
+    wsprintfA(ca, "%s\\cacerts.pem", exedir);
+
+    /* Bug-report mode: no console output, no defs work. */
+    {
+        int j;
+        for (j = 1; j < argc; j++)
+            if (!strncmp(argv[j], "--report=", 9)) {
+                if (tls_init(ca) != 0) {
+                    char rp[MAX_PATH]; FILE *rf;
+                    wsprintfA(rp, "%s\\report_result.txt", exedir);
+                    rf = fopen(rp, "w"); if (rf) { fprintf(rf, "error tls\n"); fclose(rf); }
+                    return 1;
+                }
+                return do_report(argv[j] + 9, exedir);
+            }
+    }
 
     printf("\n  CarrotAV definition updater (TLS 1.2, no Python needed)\n");
     printf("  ======================================================\n\n");
@@ -723,20 +927,38 @@ int main(int argc, char **argv)
             printf("\n  No databases downloaded. If this is a certificate or handshake\n"
                    "  error, the bundled TLS may need refreshing (see UPDATING_TLS.txt),\n"
                    "  or the network blocks port 443 to packages.microsoft.com.\n");
+        } else if (got < 2) {
+            /* daily alone is a small fraction of the signatures - compiling it
+             * would replace full definitions with a much weaker set */
+            printf("\n  Not every database downloaded. Your current definitions were kept.\n");
         } else {
-            char outcdb[MAX_PATH];
-            printf("\n  Step 2/3  compiling carrot.cdb\n");
+            char outcdb[MAX_PATH], newcdb[MAX_PATH], bakcdb[MAX_PATH];
             wsprintfA(outcdb, "%s\\carrot.cdb", defsdir);
-            if (cvd_compile(cvd_files, outcdb) != 0) {
-                printf("\n  Compile failed.\n");
+            wsprintfA(newcdb, "%s\\carrot.cdb.new", defsdir);
+            wsprintfA(bakcdb, "%s\\carrot.cdb.bak", defsdir);
+            printf("\n  Step 2/3  compiling carrot.cdb\n");
+
+            /* Build into .new and check it BEFORE touching the working database. */
+            DeleteFileA(newcdb);
+            if (cvd_compile(cvd_files, newcdb) != 0) {
+                printf("\n  Compile failed. Your current definitions were kept.\n");
+            } else if (!cdb_looks_valid(newcdb)) {
+                printf("\n  The new definitions failed their self-check. Your current definitions were kept.\n");
+            } else if (GetFileAttributesA(outcdb) != INVALID_FILE_ATTRIBUTES &&
+                       !MoveFileExA(outcdb, bakcdb, MOVEFILE_REPLACE_EXISTING)) {
+                printf("\n  Couldn't set aside the old definitions (is the file in use?). Nothing was changed.\n");
+            } else if (!MoveFileExA(newcdb, outcdb, MOVEFILE_REPLACE_EXISTING)) {
+                MoveFileExA(bakcdb, outcdb, MOVEFILE_REPLACE_EXISTING);
+                printf("\n  Couldn't install the new definitions. The old ones were restored.\n");
             } else {
                 printf("\n  Step 3/3  done\n");
-                printf("  Wrote %s\n", outcdb);
+                printf("  Wrote %s (previous kept as carrot.cdb.bak)\n", outcdb);
                 defs_ok = 1;
             }
-            /* tidy the big .cvd downloads */
-            for (i = 0; i < got; i++) DeleteFileA(cvd_files[i]);
+            DeleteFileA(newcdb);
         }
+        /* tidy the big .cvd downloads */
+        for (i = 0; i < got; i++) DeleteFileA(cvd_files[i]);
 
         /* App update: now that the defs are done, fetch the new installer
          * here in the console. The GUI offers to run it when we exit. */

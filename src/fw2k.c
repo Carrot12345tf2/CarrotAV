@@ -304,19 +304,133 @@ static int build_allow_list(wchar_t *buf, int cch)
     return o + 1;
 }
 
+/* ---- backup of the user's own TCP/IP filtering settings ----
+ * Someone may have configured TCP/IP filtering themselves before CarrotAV.
+ * Before the first change we copy their exact values aside, and turning
+ * CarrotAV's filtering off (or uninstalling) puts those back rather than
+ * resetting everything to "permit all". */
+#define BACKUP_KEY FW2K_KEY L"\\Backup"
+static const wchar_t *k_ifvals[] = { L"TCPAllowedPorts", L"UDPAllowedPorts",
+                                     L"RawIPAllowedProtocols", NULL };
+
+/* copy one value src->dst, or record that it didn't exist */
+static BOOL save_value(HKEY src, const wchar_t *name, HKEY dst)
+{
+    BYTE data[4096];
+    DWORD type, sz = sizeof data, one = 1;
+    wchar_t absent[80];
+    wsprintfW(absent, L"%s.absent", name);
+    if (RegQueryValueExW(src, name, NULL, &type, data, &sz) == ERROR_SUCCESS)
+        return RegSetValueExW(dst, name, 0, type, data, sz) == ERROR_SUCCESS;
+    return RegSetValueExW(dst, absent, 0, REG_DWORD, (const BYTE*)&one, sizeof one) == ERROR_SUCCESS;
+}
+
+static BOOL put_back(HKEY bak, const wchar_t *name, HKEY dst)
+{
+    BYTE data[4096];
+    DWORD type, sz = sizeof data;
+    wchar_t absent[80];
+    wsprintfW(absent, L"%s.absent", name);
+    if (RegQueryValueExW(bak, absent, NULL, NULL, NULL, NULL) == ERROR_SUCCESS) {
+        LONG r = RegDeleteValueW(dst, name);
+        return r == ERROR_SUCCESS || r == ERROR_FILE_NOT_FOUND;
+    }
+    if (RegQueryValueExW(bak, name, NULL, &type, data, &sz) != ERROR_SUCCESS) return FALSE;
+    return RegSetValueExW(dst, name, 0, type, data, sz) == ERROR_SUCCESS;
+}
+
+static void backup_once(void)
+{
+    HKEY chk, bak, params, ifaces, one, dst;
+    wchar_t sub[160], path[300];
+    DWORD i = 0;
+    int k;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, BACKUP_KEY, 0, KEY_READ, &chk) == ERROR_SUCCESS) {
+        RegCloseKey(chk);                  /* already have the true original */
+        return;
+    }
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, BACKUP_KEY, 0, NULL, 0, KEY_ALL_ACCESS,
+                        NULL, &bak, NULL) != ERROR_SUCCESS) return;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TCPIP_PARAMS, 0, KEY_READ, &params) == ERROR_SUCCESS) {
+        save_value(params, L"EnableSecurityFilters", bak);
+        RegCloseKey(params);
+    }
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TCPIP_IFACES, 0, KEY_READ, &ifaces) == ERROR_SUCCESS) {
+        while (RegEnumKeyW(ifaces, i++, sub, 160) == ERROR_SUCCESS) {
+            if (RegOpenKeyExW(ifaces, sub, 0, KEY_READ, &one) != ERROR_SUCCESS) continue;
+            wsprintfW(path, L"%s\\%s", BACKUP_KEY, sub);
+            if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, path, 0, NULL, 0, KEY_SET_VALUE,
+                                NULL, &dst, NULL) == ERROR_SUCCESS) {
+                for (k = 0; k_ifvals[k]; k++) save_value(one, k_ifvals[k], dst);
+                RegCloseKey(dst);
+            }
+            RegCloseKey(one);
+        }
+        RegCloseKey(ifaces);
+    }
+    RegCloseKey(bak);
+    log_line(L"FIREWALL  backed up the original TCP/IP filtering settings");
+}
+
+/* Restore the user's original settings. FALSE if there's no backup. */
+static BOOL restore_backup(void)
+{
+    HKEY bak, params, ifaces, one, src;
+    wchar_t sub[160], path[300];
+    DWORD i = 0;
+    int k, fails = 0;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, BACKUP_KEY, 0, KEY_READ, &bak) != ERROR_SUCCESS)
+        return FALSE;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TCPIP_PARAMS, 0, KEY_SET_VALUE, &params) == ERROR_SUCCESS) {
+        if (!put_back(bak, L"EnableSecurityFilters", params)) fails++;
+        RegCloseKey(params);
+    } else fails++;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TCPIP_IFACES, 0, KEY_READ, &ifaces) == ERROR_SUCCESS) {
+        while (RegEnumKeyW(ifaces, i++, sub, 160) == ERROR_SUCCESS) {
+            wsprintfW(path, L"%s\\%s", BACKUP_KEY, sub);
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_READ, &src) != ERROR_SUCCESS)
+                continue;                  /* adapter added after the backup */
+            if (RegOpenKeyExW(ifaces, sub, 0, KEY_SET_VALUE, &one) == ERROR_SUCCESS) {
+                for (k = 0; k_ifvals[k]; k++) if (!put_back(src, k_ifvals[k], one)) fails++;
+                RegCloseKey(one);
+            } else fails++;
+            RegCloseKey(src);
+        }
+        RegCloseKey(ifaces);
+    }
+    RegCloseKey(bak);
+    if (fails) {
+        log_line(L"FIREWALL  restoring original TCP/IP filtering: %d value(s) failed", fails);
+        g_err = ERROR_WRITE_FAULT;
+        return TRUE;                       /* keep the backup for another try */
+    }
+    SHDeleteKeyW(HKEY_LOCAL_MACHINE, BACKUP_KEY);
+    log_line(L"FIREWALL  restored the original TCP/IP filtering settings");
+    return TRUE;
+}
+
 static BOOL tcpip_write(BOOL on)
 {
     HKEY params, ifaces, one;
-    DWORD i = 0, en = on ? 1 : 0;
+    DWORD i = 0, en = 1;
     wchar_t sub[160], allowed[FW2K_MAXPORTS * 8 + 4];
     static const wchar_t permit_all[] = { L'0', 0, 0 };   /* "0" = permit all */
-    int len;
+    int len, fails = 0;
 
     g_err = 0;
+    if (!on) {
+        /* put the user's own settings back; only if there were none do we
+         * fall back to switching filtering off entirely */
+        if (restore_backup()) { g_reboot = TRUE; return g_err == 0; }
+        en = 0;
+    } else {
+        backup_once();
+    }
+
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TCPIP_PARAMS, 0, KEY_SET_VALUE, &params)
             != ERROR_SUCCESS) { g_err = ERROR_ACCESS_DENIED; return FALSE; }
-    RegSetValueExW(params, L"EnableSecurityFilters", 0, REG_DWORD,
-                   (const BYTE*)&en, sizeof(en));
+    if (RegSetValueExW(params, L"EnableSecurityFilters", 0, REG_DWORD,
+                       (const BYTE*)&en, sizeof(en)) != ERROR_SUCCESS) fails++;
     RegCloseKey(params);
 
     if (on) len = build_allow_list(allowed, FW2K_MAXPORTS * 8);
@@ -325,19 +439,26 @@ static BOOL tcpip_write(BOOL on)
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TCPIP_IFACES, 0, KEY_READ, &ifaces)
             != ERROR_SUCCESS) { g_err = ERROR_ACCESS_DENIED; return FALSE; }
     while (RegEnumKeyW(ifaces, i++, sub, 160) == ERROR_SUCCESS) {
-        if (RegOpenKeyExW(ifaces, sub, 0, KEY_SET_VALUE, &one) != ERROR_SUCCESS)
+        if (RegOpenKeyExW(ifaces, sub, 0, KEY_SET_VALUE, &one) != ERROR_SUCCESS) {
+            fails++;
             continue;
-        RegSetValueExW(one, L"TCPAllowedPorts", 0, REG_MULTI_SZ,
-                       (const BYTE*)allowed, len * sizeof(wchar_t));
+        }
+        if (RegSetValueExW(one, L"TCPAllowedPorts", 0, REG_MULTI_SZ,
+                           (const BYTE*)allowed, len * sizeof(wchar_t)) != ERROR_SUCCESS) fails++;
         /* Leave UDP and raw IP permitted - filtering UDP breaks DNS/DHCP. */
-        RegSetValueExW(one, L"UDPAllowedPorts", 0, REG_MULTI_SZ,
-                       (const BYTE*)permit_all, 3 * sizeof(wchar_t));
-        RegSetValueExW(one, L"RawIPAllowedProtocols", 0, REG_MULTI_SZ,
-                       (const BYTE*)permit_all, 3 * sizeof(wchar_t));
+        if (RegSetValueExW(one, L"UDPAllowedPorts", 0, REG_MULTI_SZ,
+                           (const BYTE*)permit_all, 3 * sizeof(wchar_t)) != ERROR_SUCCESS) fails++;
+        if (RegSetValueExW(one, L"RawIPAllowedProtocols", 0, REG_MULTI_SZ,
+                           (const BYTE*)permit_all, 3 * sizeof(wchar_t)) != ERROR_SUCCESS) fails++;
         RegCloseKey(one);
     }
     RegCloseKey(ifaces);
     g_reboot = TRUE;
+    if (fails) {
+        g_err = ERROR_WRITE_FAULT;
+        log_line(L"FIREWALL  TCP/IP filtering: %d registry write(s) failed", fails);
+        return FALSE;
+    }
     log_line(L"FIREWALL  TCP/IP filtering %s - restart required", on ? L"on" : L"off");
     return TRUE;
 }
